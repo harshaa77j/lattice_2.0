@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+requests
+
+# Week 2: training (uncomment later)
+# torch
+# torchvision
+
+# Once everything installs and runs, pin exact versions so every machine
+# matches:  pip freeze  and copy the versions of the packages above here.
