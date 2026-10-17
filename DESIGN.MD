@@ -12,7 +12,7 @@ Short Term Goal: Have 5 volunteer laptops, with a mid sized model to train. Uplo
 2 weeks for demo goal
 
 - **Networking:** 
-Tailscale with a star layout
+Tailscale with a star layout. Volunteers (Windows) reach the server over Tailscale; the Mac reaches it over local wifi (see Open questions).
 
 ---
 
@@ -111,6 +111,43 @@ Standard CPU (e.g., Core i5 / Ryzen 5) ->7.5 – 25 minutes
 - **What I'm giving up:** 
 A small CNN on CIFAR-10 typically tops out around 65–75% test accuracy, and CPU rounds are slower than MNIST. That realistic ceiling should also set my target accuracy, so I have to pick something like 60% accuracy.
 ---
+
+## D5. Where the server runs
+
+- **Decision:** 
+Raspberry Pi (Ubuntu, Python 3.10) as the development server. Demo-day host decided later.
+- **Options considered:** 
+Pi, one of the laptops, a cloud VM
+- **Why:** 
+Always on, low power, Tailscale works on Linux, frees a laptop to be a volunteer. Mac (on same wifi) reaches it without Tailscale.
+- **What I'm giving up:** 
+Slower CPU, so evaluating the global model each round may add time. Timings measured with the Pi as server may not match the demo setup.
+- **Revisit if:** 
+Evaluation on the Pi noticeably slows rounds, or the Pi can't be brought to the demo venue. Server address is read from config, so moving it is a one-line change.
+
+## D6. Web framework
+
+- **Decision:** 
+FastAPI (served with uvicorn)
+- **Options considered:** 
+FastAPI, Flask
+- **Why:** 
+Automatic /docs page for testing endpoints without a client; request bodies validated through Pydantic models, so malformed requests get clear errors.
+- **What I'm giving up:** 
+Flask's simplicity.
+
+## D7. What a job submission contains
+
+- **Decision:** 
+Configuration only (model name, dataset, rounds, local epochs, target accuracy). No code.
+- **Options considered:** 
+Config only; researcher uploads model code
+- **Why:** 
+In a volunteer system, accepting uploaded code means every volunteer laptop runs whatever anyone submits. That is a serious security hole.
+- **What I'm giving up:** 
+Researchers can only train models already defined in the node client.
+- **Revisit if:** 
+Researchers need custom models. Would need sandboxing, code review, or signed models first.
 
 -  **Open Questions:** 
 1. Tailscale sign-in freezes on macOS Sonoma 14.0; working around it with Windows machines
