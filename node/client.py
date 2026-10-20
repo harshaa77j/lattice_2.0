@@ -20,7 +20,7 @@ def fail(message):
 def load_config():
     load_dotenv()
     
-    server=os.getenv("LATTICE_SERVER")
+    server=os.getenv("LATTICE_SERVER").rstrip("/")
     if not server:
         fail("LATTICE_SERVER is missing or empty. Set it in node/.env.")
     if not server.startswith(("http://", "https://")):
@@ -44,19 +44,18 @@ def load_config():
 def register(config):
     
     endpoint_url = f"{config['server']}/register"
-    node_to_register=[{
+    node_to_register={
         "node_id": config['node_id'],
         "cpu_count": config['cpu_count'],
         "device": config['device']
-    }]
+    }
     response=requests.post(endpoint_url, json=node_to_register, timeout=REQUEST_TIMEOUT)
     if response.status_code == 200:
         print("success")
         return True
-    else:
-        print(response.status_code)
-        print(response.text)
-        return False
+    print(response.status_code)
+    print(response.text)
+    return False
     
 def main():
     config = load_config()
