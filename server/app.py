@@ -4,6 +4,8 @@ from typing import Literal
 from datetime import datetime
 import time
 
+from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN
+
 HEARTBEAT_TIMEOUT=20
 
 app=FastAPI()
@@ -13,7 +15,7 @@ def check():
     return {"message":"working"}
 
 class NodeRegistration(BaseModel):
-    node_id: str = Field(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    node_id: str = Field(min_length=1, max_length=NODE_ID_MAX_LEN, pattern=NODE_ID_PATTERN)
     cpu_count: int = Field(gt=0)  
     device: Literal['cuda','cpu','mps'] 
     

@@ -2,6 +2,7 @@ fastapi
 uvicorn
 requests
 
+python-dotenv
 # Week 2: training (uncomment later)
 # torch
 # torchvision
