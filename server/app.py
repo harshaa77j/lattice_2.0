@@ -4,7 +4,7 @@ from typing import Literal
 from datetime import datetime
 import time
 
-from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN
+from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN, NOT_REGISTERED
 
 HEARTBEAT_TIMEOUT=20
 
@@ -37,7 +37,7 @@ def register_node(node: NodeRegistration):
 def heartbeat(node_id:str ):
     node = nodes.get(node_id)
     if node is None:
-        raise HTTPException(status_code=404, detail="Node not Registered!")
+        raise HTTPException(status_code=404, detail=NOT_REGISTERED)
     node.last_seen=datetime.now()
     node.last_seen_mono = time.monotonic() 
     return {"ok": True}
