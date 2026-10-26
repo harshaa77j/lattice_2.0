@@ -2,6 +2,9 @@
 
 import re
 
+NODE_TOKEN_HEADER = "X-Lattice-Token"        # sent by volunteer nodes
+RESEARCHER_KEY_HEADER = "X-Researcher-Key"   # sent by the researcher website
+ADMIN_KEY_HEADER = "X-Admin-Key" 
 NODE_ID_MAX_LEN = 64
 NODE_ID_PATTERN = r"^[A-Za-z0-9_-]+$"
 _NODE_ID_RE = re.compile(NODE_ID_PATTERN)

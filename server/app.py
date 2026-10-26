@@ -1,14 +1,32 @@
+import os
+import secrets
+from dotenv import load_dotenv
+from fastapi import Depends, Header
 from fastapi import FastAPI,HTTPException
 from pydantic import BaseModel, Field
 from typing import Literal
 from datetime import datetime
 import time
 
-from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN, NOT_REGISTERED
+from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN, NOT_REGISTERED, NODE_TOKEN_HEADER
+
+load_dotenv()
+NODE_TOKEN = os.getenv("LATTICE_TOKEN", "").strip()
+if not NODE_TOKEN:
+    raise RuntimeError(
+        "LATTICE_TOKEN is not set. Add it to server/.env "
+        "(or the host's environment variables) before starting the server."
+    )
 
 HEARTBEAT_TIMEOUT=20
 
 app=FastAPI()
+
+def require_node_token(token: str | None = Header(default=None, alias=NODE_TOKEN_HEADER),):
+    if token is None:
+        raise HTTPException(status_code=401, detail="Invalid or missing node token")
+    if not secrets.compare_digest(token.encode(), NODE_TOKEN.encode()):
+        raise HTTPException(status_code=401, detail="Invalid or missing node token")
 
 @app.get("/")
 def check():
@@ -26,14 +44,14 @@ class NodeRecord(NodeRegistration):
 #in-mem
 nodes: dict[str, NodeRecord] = {}
 
-@app.post("/register")
+@app.post("/register",dependencies=[Depends(require_node_token)])
 def register_node(node: NodeRegistration):
     data=node.model_dump()
     record=NodeRecord(**data)
     nodes[node.node_id]=record
     return record
     
-@app.post("/heartbeat/{node_id}")
+@app.post("/heartbeat/{node_id}",dependencies=[Depends(require_node_token)])
 def heartbeat(node_id:str ):
     node = nodes.get(node_id)
     if node is None:
@@ -42,7 +60,7 @@ def heartbeat(node_id:str ):
     node.last_seen_mono = time.monotonic() 
     return {"ok": True}
 
-@app.get("/status")
+@app.get("/status",dependencies=[Depends(require_node_token)])
 def status():
     stats={}
     now = time.monotonic()
