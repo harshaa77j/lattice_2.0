@@ -8,6 +8,9 @@ from typing import Literal
 from datetime import datetime
 import time
 
+from pathlib import Path
+from fastapi.staticfiles import StaticFiles
+
 from shared.protocol import NODE_ID_MAX_LEN, NODE_ID_PATTERN, NOT_REGISTERED, NODE_TOKEN_HEADER
 
 load_dotenv()
@@ -23,12 +26,10 @@ HEARTBEAT_TIMEOUT=20
 app=FastAPI()
 
 def require_node_token(token: str | None = Header(default=None, alias=NODE_TOKEN_HEADER),):
-    if token is None:
-        raise HTTPException(status_code=401, detail="Invalid or missing node token")
-    if not secrets.compare_digest(token.encode(), NODE_TOKEN.encode()):
+    if token is None or not secrets.compare_digest(token.encode(), NODE_TOKEN.encode()):
         raise HTTPException(status_code=401, detail="Invalid or missing node token")
 
-@app.get("/")
+@app.get("/health")
 def check():
     return {"message":"working"}
 
@@ -70,3 +71,7 @@ def status():
         node["alive"]=elapsed <= HEARTBEAT_TIMEOUT
         stats[node_id]=node
     return stats
+
+FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
+if FRONTEND_DIR.is_dir():
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
