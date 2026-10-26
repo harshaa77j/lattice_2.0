@@ -1,0 +1,7 @@
+.venv/
+**/__pycache__/
+data/
+checkpoints/
+.git/
+**/.env
+.pytest_cache/
