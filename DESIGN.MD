@@ -44,6 +44,7 @@ Discard
 Yes, for the rounds that are left. It re-registers and downloads the current global model; if the job is finished, it stays idle.
 - **Why these numbers:**
 A 4× margin over the heartbeat interval tolerates a few missed beats from a slow network without false alarms. The deadline comes from the timing run: [to fill in].
+edit:provisional deadline 90 s, to recompute from the slowest Windows laptop.
 - **Revisit if:**
 Healthy nodes get marked dropped (timeout too short), or rounds wait too long for dead nodes (too long).
 
@@ -105,6 +106,7 @@ CNN: 3 blocks of Conv2d (3×3, padding 1) → ReLU → MaxPool, with channels 3 
 - **Model size / time per round:**
 620,362 parameters ≈ 2.5 MB, uploaded by each node every round.
 Time per round on CPU: 30–60 s (estimated, to measure in the timing run).
+edit: Baseline, Mac CPU: 65.9% at epoch 2 (3.9 min), 72.6% at epoch 3 (6.0 min). Target to choose after the weak laptop’s baseline
 - **Why this fits the demo:**
 One CPU laptop alone needs an estimated 7.5–25 minutes to reach the target (to measure in the baseline run), while compute per round is much larger than the ~2.5 MB of weights transferred.
 - **What I'm giving up:**

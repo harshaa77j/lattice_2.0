@@ -8,5 +8,3 @@ torch
 torchvision
 
 pytest
-# Once everything installs and runs, pin exact versions so every machine
-# matches:  pip freeze  and copy the versions of the packages above here.
