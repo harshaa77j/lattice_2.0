@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-class Cnn_Small(nn.Module):
+class SmallCNN(nn.Module):
     def __init__(self):
         super().__init__()
         self.layers = nn.Sequential(
@@ -24,7 +24,7 @@ class Cnn_Small(nn.Module):
         return self.layers(x)
     
 if __name__ == "__main__":
-    model=Cnn_Small()
+    model=SmallCNN()
     x = torch.randn(4, 3, 32, 32)  #4 fake images
     output=model(x)
     print(output.shape)
