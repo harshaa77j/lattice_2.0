@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   api, ApiError, clearKey, usePolling, pct, fmtPct, fmtDuration, SAMPLE_JOB, SAMPLE_JOBS,
@@ -39,7 +39,11 @@ function ApiErrorBox({ error, onBadKey }) {
 /* ================= New job ================= */
 export function NewJob() {
   const navigate = useNavigate();
-  const [form, setForm] = useState({ name: "cifar10-run-1", target: 60, maxRounds: 30, epochs: 1 });
+  const [form, setForm] = useState({ name: "cifar10-run-1", model: "cnn_bn", target: 80, maxRounds: 40, epochs: 1 });
+  const [models, setModels] = useState(null);
+  useEffect(() => {
+    api.listModels().then(setModels).catch(() => setModels([]));
+  }, []);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -64,7 +68,7 @@ export function NewJob() {
               setBusy(true); setError(null);
               try {
                 await api.createJob({
-                  name: form.name.trim(), dataset: "cifar10", model: "cnn_small",
+                  name: form.name.trim(), dataset: "cifar10", model: form.model,
                   target_accuracy: Number(form.target) / 100,
                   max_rounds: Number(form.maxRounds), local_epochs: Number(form.epochs),
                 });
@@ -93,9 +97,21 @@ export function NewJob() {
                 <div className="field-group">
                   <span>Model</span>
                   <div className="chips">
-                    <button type="button" className="chip on" aria-pressed="true">cnn_small · 620k params · 2.5 MB</button>
-                    <button type="button" className="chip" disabled>Model library (soon)</button>
+                    {models === null && <span className="muted small">Loading the model library…</span>}
+                    {models?.length === 0 && <span className="muted small">Couldn't load the model library.</span>}
+                    {models?.map((m) => (
+                      <button key={m.name} type="button" disabled={!m.ready}
+                        className={`chip${form.model === m.name ? " on" : ""}`}
+                        aria-pressed={form.model === m.name}
+                        title={m.description}
+                        onClick={() => setForm((f) => ({ ...f, model: m.name }))}>
+                        {m.title}{m.ready ? ` · ${Math.round(m.parameters / 1000)}k params · ${m.size_mb} MB` : " (soon)"}
+                      </button>
+                    ))}
                   </div>
+                  {models?.find((m) => m.name === form.model) && (
+                    <span className="muted small">{models.find((m) => m.name === form.model).description}</span>
+                  )}
                 </div>
               </div>
               <div style={{ flex: "1 1 280px", display: "flex", flexDirection: "column", gap: 18 }}>

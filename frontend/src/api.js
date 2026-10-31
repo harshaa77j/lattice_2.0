@@ -49,6 +49,7 @@ async function request(path, { kind, method = "GET", body, raw = false } = {}) {
 
 // D8 contract (DESIGN.md)
 export const api = {
+  listModels: () => request("/models"),
   listJobs: () => request("/jobs", { kind: "researcher" }),
   getJob: (id) => request(`/jobs/${encodeURIComponent(id)}`, { kind: "researcher" }),
   createJob: (job) => request("/jobs", { kind: "researcher", method: "POST", body: job }),
