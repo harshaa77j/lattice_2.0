@@ -23,9 +23,11 @@ RUN pip install --no-cache-dir torch==2.14.1+cpu torchvision==0.29.1+cpu \
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+RUN python -c "from torchvision.datasets import CIFAR10; CIFAR10('/app/data', train=False, download=True)"
+
 COPY . .
 # The finished website from stage 1 (only the built files, no Node.js)
 COPY --from=frontend /frontend/dist ./frontend/dist
 
 EXPOSE 8000
-CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "server.app:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
