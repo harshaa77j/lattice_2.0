@@ -42,7 +42,10 @@ async function request(path, { kind, method = "GET", body, raw = false } = {}) {
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json()).detail; } catch { /* not JSON */ }
-    throw new ApiError(res.status, typeof detail === "string" && detail ? detail : res.statusText);
+        const fallback = res.status === 502 || res.status === 503
+      ? "The server is restarting or unavailable. Try again in a minute."
+      : res.statusText || `The server returned an error (${res.status}).`;
+    throw new ApiError(res.status, typeof detail === "string" && detail ? detail : fallback);
   }
   return raw ? res : res.json();
 }
