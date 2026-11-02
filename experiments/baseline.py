@@ -18,7 +18,7 @@ def main():
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--device", default="cpu", choices=["cpu", "mps", "cuda"])
     parser.add_argument("--target", type=float, default=0.85, help="stop at this test accuracy (fraction)")
-    parser.add_argument("--max-epochs", type=int, default=30, help="safety cap")
+    parser.add_argument("--max-epochs", type=int, default=30, help="schedule length and safety cap")
     args = parser.parse_args()
 
     spec = get_spec(args.model)
@@ -38,15 +38,18 @@ def main():
     start = time.perf_counter()
     with open(out_path, "w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(["epoch", "train_loss", "test_accuracy", "elapsed_s"])
+        writer.writerow(["epoch", "lr", "train_loss", "test_accuracy", "elapsed_s"])
 
         for epoch in range(1, args.max_epochs + 1):
+            lr = spec.lr_at((epoch - 1) / args.max_epochs)
+            for group in optimizer.param_groups:
+                group["lr"] = lr
             loss = train_one_epoch(model, train_loader, optimizer, args.device)
             accuracy = evaluate(model, test_loader, args.device)
             elapsed = time.perf_counter() - start
-            writer.writerow([epoch, round(loss, 4), round(accuracy, 4), round(elapsed, 1)])
+            writer.writerow([epoch, round(lr, 5), round(loss, 4), round(accuracy, 4), round(elapsed, 1)])
             f.flush()
-            print(f"epoch {epoch}: loss {loss:.3f}, test {accuracy:.1%}, {elapsed / 60:.1f} min")
+            print(f"epoch {epoch}: lr {lr:.4f}, loss {loss:.3f}, test {accuracy:.1%}, {elapsed / 60:.1f} min")
             if accuracy >= args.target:
                 print(f"Reached {accuracy:.1%} at epoch {epoch}, after {elapsed / 60:.1f} min.")
                 break

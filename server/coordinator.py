@@ -211,6 +211,7 @@ class Coordinator:
                 "slice_id": r.assignments[node_id],
                 "num_slices": r.num_slices,
                 "local_epochs": job.local_epochs,
+                "max_rounds": job.max_rounds,
             }
 
     def get_weights(self) -> Optional[tuple]:

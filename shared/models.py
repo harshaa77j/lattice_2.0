@@ -1,11 +1,3 @@
-"""Lattice model library.
-
-Every model a job can use is registered here by name. A job only sends the
-name (e.g. "cnn_bn"); every machine builds the identical model from this file,
-so no code ever travels over the network (DESIGN.md D7).
-
-To add a model: write its nn.Module, then add a ModelSpec to LIBRARY.
-"""
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -14,6 +6,7 @@ from torch import nn
 
 from shared.model import SmallCNN
 
+import math
 
 class BNCNN(nn.Module):
     """Three blocks of two 3x3 convs with batch norm, then global average pooling.
@@ -48,7 +41,6 @@ class BNCNN(nn.Module):
     def forward(self, x):
         return self.head(self.features(x))
 
-
 @dataclass(frozen=True)
 class ModelSpec:
     name: str                                   # what jobs refer to, e.g. "cnn_bn"
@@ -60,6 +52,7 @@ class ModelSpec:
     lr: float
     momentum: float = 0.9
     weight_decay: float = 0.0
+    schedule: str = "constant"  
 
     @property
     def ready(self) -> bool:
@@ -70,9 +63,21 @@ class ModelSpec:
             raise ValueError(f"model '{self.name}' is not available yet")
         return self.build()
 
-    def make_optimizer(self, model: nn.Module) -> torch.optim.Optimizer:
+    def lr_at(self, progress: float) -> float:
+        """Learning rate at a point in training: progress 0.0 = start, 1.0 = end.
+
+        "cosine" starts at lr and glides down along half a cosine wave to 2% of it,
+        big steps early to learn fast, small steps late to settle.
+        """
+        if self.schedule != "cosine":
+            return self.lr
+        p = min(max(progress, 0.0), 1.0)
+        return self.lr * (0.02 + 0.98 * 0.5 * (1 + math.cos(math.pi * p)))
+
+    def make_optimizer(self, model: nn.Module, progress: float = 0.0) -> torch.optim.Optimizer:
         return torch.optim.SGD(
-            model.parameters(), lr=self.lr, momentum=self.momentum, weight_decay=self.weight_decay
+            model.parameters(), lr=self.lr_at(progress), momentum=self.momentum,
+            weight_decay=self.weight_decay,
         )
 
     def summary(self) -> dict:
@@ -86,7 +91,6 @@ class ModelSpec:
             "size_mb": round(params * 4 / 1e6, 1) if params else None,
             "ready": self.ready,
         }
-
 
 LIBRARY: dict[str, ModelSpec] = {
     "cnn_small": ModelSpec(
@@ -108,6 +112,7 @@ LIBRARY: dict[str, ModelSpec] = {
         batch_size=128,
         lr=0.05,
         weight_decay=5e-4,
+        schedule="cosine",
     ),
     "resnet_finetune": ModelSpec(
         name="resnet_finetune",
@@ -122,7 +127,6 @@ LIBRARY: dict[str, ModelSpec] = {
 
 DEFAULT_MODEL = "cnn_bn"
 
-
 def get_spec(name: str) -> ModelSpec:
     """Look up a model that can be used now; a clear error otherwise."""
     spec = LIBRARY.get(name)
@@ -132,7 +136,6 @@ def get_spec(name: str) -> ModelSpec:
     if not spec.ready:
         raise ValueError(f"model '{name}' is not available yet")
     return spec
-
 
 def list_models() -> list[dict]:
     return [spec.summary() for spec in LIBRARY.values()]

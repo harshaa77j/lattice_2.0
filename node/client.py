@@ -127,7 +127,6 @@ def heartbeat_loop(config: dict):
 _datasets: dict = {}
 
 def training_data(augment: bool):
-    """CIFAR-10 training set, loaded once per augmentation setting."""
     if augment not in _datasets:
         _datasets[augment] = get_cifar10(train=True, augment=augment)
     return _datasets[augment]
@@ -149,12 +148,14 @@ def run_task(config: dict, session: requests.Session, task: dict):
     model = spec.make_model()
     model.load_state_dict(bytes_to_state_dict(r.content))
     model.to(device)
-    optimizer = spec.make_optimizer(model)
+    progress = (rnd - 1) / task["max_rounds"] if task.get("max_rounds") else 0.0
+    optimizer = spec.make_optimizer(model, progress)
+    lr = optimizer.param_groups[0]["lr"]
     part = get_slice(training_data(spec.augment), slice_id, num_slices)
     loader = DataLoader(part, batch_size=spec.batch_size, shuffle=True, num_workers=0)
 
-    log.info("Round %d: training slice %d of %d (%d images, %s, %d epoch(s))",
-             rnd, slice_id + 1, num_slices, len(part), spec.name, task["local_epochs"])
+    log.info("Round %d: training slice %d of %d (%d images, %s, %d epoch(s), lr %.4f)",
+             rnd, slice_id + 1, num_slices, len(part), spec.name, task["local_epochs"], lr)
     start = time.perf_counter()
     for epoch in range(task["local_epochs"]):
         loss = train_one_epoch(model, loader, optimizer, device)
