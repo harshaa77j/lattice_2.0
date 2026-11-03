@@ -24,6 +24,10 @@ from shared.serialization import bytes_to_state_dict
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
+import torch
+torch.set_num_threads(int(os.getenv("LATTICE_TORCH_THREADS", "1")))
+logging.getLogger("lattice").info("PyTorch threads: %d", torch.get_num_threads())
+
 VERSION = "1.0.0"
 MAX_UPDATE_BYTES = 20 * 1024 * 1024
 
