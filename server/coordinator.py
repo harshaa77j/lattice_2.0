@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
+import numpy as np
 
 import torch
 
@@ -457,20 +458,46 @@ class Coordinator:
             return list(self.events)[:limit]
 
 
-class Evaluator:
-    """Server-side evaluation: a fixed test subset each round, the full set to confirm."""
+EVAL_FILE = Path(__file__).resolve().parent / "eval" / "cifar10_test.npz"
 
-    def __init__(self, subset_size: int = 2000, root: str = "./data"):
+
+class _ArrayDataset(torch.utils.data.Dataset):
+    """Test images held in memory as raw pixels, normalised on access."""
+
+    def __init__(self, images, labels):
+        from shared.data import get_transform
+        self.images, self.labels = images, labels
+        self.transform = get_transform(augment=False)
+
+    def __len__(self):
+        return len(self.labels)
+
+    def __getitem__(self, i):
+        return self.transform(self.images[i]), int(self.labels[i])
+
+
+class Evaluator:
+    """Server-side evaluation: a fixed test subset each round, the full set to confirm.
+
+    Reads the CIFAR-10 test set from server/eval/cifar10_test.npz, committed to the
+    repository, so the server never downloads anything at runtime.
+    """
+
+    def __init__(self, subset_size: int = 2000, path: Path = EVAL_FILE):
         self.subset_size = subset_size
-        self.root = root
+        self.path = Path(path)
         self._test = None
         self._lock = threading.Lock()
 
     def _dataset(self):
         with self._lock:
             if self._test is None:
-                from shared.data import get_cifar10
-                self._test = get_cifar10(train=False, root=self.root)
+                if not self.path.is_file():
+                    raise FileNotFoundError(
+                        f"{self.path} is missing. Create it with: python -m tools.make_eval_set")
+                with np.load(self.path) as data:           # allow_pickle is off by default
+                    self._test = _ArrayDataset(data["images"], data["labels"])
+                log.info("Loaded %d evaluation images from %s", len(self._test), self.path.name)
             return self._test
 
     def __call__(self, model_name: str, state_dict: dict, full: bool) -> float:
