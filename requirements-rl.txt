@@ -1,0 +1,8 @@
+# Pin to the exact versions you trained with (run: pip freeze | findstr /i "stable torch gymnasium numpy")
+stable-baselines3
+torch
+gymnasium
+numpy
+pandas
+matplotlib
+pytest
