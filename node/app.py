@@ -15,11 +15,10 @@ import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
-
+import socket
 import requests
 
-from node import client as C
-
+C = None   
 COLORS = {"idle": "#9AA0A6", "waiting": "#3B82F6", "training": "#16A34A",
           "paused": "#D97706", "offline": "#DC2626"}
 BG, CARD, INK, MUTED = "#F2F2EF", "#FFFFFF", "#17181C", "#6B6F76"
@@ -208,20 +207,44 @@ class App:
         self.root.after(200, self.pump)
 
 
+_instance_lock = None   # kept for the whole run: holds the "already running" lock
+
+
 def main():
+    global C, _instance_lock
+    # One copy at a time: the first app holds this local port; a second one can't bind it.
+    _instance_lock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        _instance_lock.bind(("127.0.0.1", 47913))
+    except OSError:
+        root = tk.Tk()
+        root.withdraw()
+        messagebox.showinfo("Lattice", "Lattice is already running. Look for its window on your screen.")
+        return
+
     root = tk.Tk()
+    root.title("Lattice volunteer")
+    root.configure(bg=BG)
+    splash = tk.Label(root, text="Starting Lattice\u2026", font=("Helvetica", 16, "bold"),
+                      bg=BG, fg=INK, padx=60, pady=40)
+    splash.pack()
+    root.update()                                  # show the window before the slow import
+
+    from node import client as client_module       # loads PyTorch: the slow part
+    C = client_module
+
     err = io.StringIO()
     try:
         with contextlib.redirect_stderr(err):
-            config = C.load_config()             # exits with a message if node/.env is wrong
+            config = C.load_config()               # exits with a message if node/.env is wrong
     except SystemExit:
         root.withdraw()
         messagebox.showerror("Lattice", "Lattice isn't set up correctly:\n\n" + err.getvalue().strip()
                              + "\n\nRun the installer again, or download a fresh package.")
         return
+    splash.destroy()
     App(root, config)
     root.mainloop()
-
-
+    
 if __name__ == "__main__":
     main()
