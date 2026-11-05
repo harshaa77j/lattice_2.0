@@ -2,33 +2,83 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { Shell, PageHead, Icon } from "../components/ui.jsx";
 
-const origin = typeof window !== "undefined" ? window.location.origin : "[server-url]";
+async function downloadPackage(platform, code) {
+  const res = await fetch(`/download/${platform}?code=${encodeURIComponent(code)}`);
+  if (!res.ok) {
+    let detail = "";
+    try { detail = (await res.json()).detail || ""; } catch { /* not JSON */ }
+    throw new Error(res.status === 403
+      ? (detail === "invalid invite code" ? "That invite code doesn't match. Check it with the person who invited you."
+                                          : "Downloads aren't enabled on this server yet.")
+      : `The download failed (${res.status}). Try again in a minute.`);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `lattice-volunteer-${platform}.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+const STEPS = {
+  windows: ["Extract the zip (right-click \u2192 Extract All).",
+            "Double-click install.bat. If Windows warns you, choose More info \u2192 Run anyway.",
+            "Double-click start.bat to volunteer. Close its window to stop."],
+  mac: ["Double-click the zip to unzip it.",
+        "Right-click install.command \u2192 Open \u2192 Open (first time only).",
+        "Open start.command the same way to volunteer. Close its window to stop."],
+};
 
 export function VolunteerStart() {
-  const [asked, setAsked] = useState(null);
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const [done, setDone] = useState(null);
+
+  const get = async (platform) => {
+    setError(null); setDone(null); setBusy(platform);
+    try { await downloadPackage(platform, code.trim()); setDone(platform); }
+    catch (e) { setError(e.message); }
+    finally { setBusy(null); }
+  };
+
   return (
     <Shell area="volunteer">
       <PageHead
         title="Lend your laptop"
-        sub="Your idle CPU trains someone else's model. Everything happens in the small Lattice app; this page is for downloads and your history."
+        sub="Your idle computer trains someone else's model. Download the volunteer package, install it once, and start it whenever you want to help."
       />
       <section className="card" style={{ padding: 30, gap: 20 }}>
-        <h2 style={{ fontSize: 26, fontWeight: 600 }}>Get the Lattice app</h2>
+        <h2 style={{ fontSize: 26, fontWeight: 600 }}>Get the volunteer package</h2>
+        <label className="field" style={{ maxWidth: 420 }}>
+          <span>Invite code</span>
+          <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="From the person who invited you"
+                 autoComplete="off" spellCheck={false} />
+        </label>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-          <button type="button" className="btn" onClick={() => setAsked("Windows")}>{Icon.download}Download for Windows</button>
-          <button type="button" className="btn secondary" onClick={() => setAsked("Mac")}>{Icon.download}Download for Mac</button>
+          <button type="button" className="btn" disabled={!code.trim() || busy} onClick={() => get("windows")}>
+            {Icon.download}{busy === "windows" ? "Preparing\u2026" : "Download for Windows"}
+          </button>
+          <button type="button" className="btn secondary" disabled={!code.trim() || busy} onClick={() => get("mac")}>
+            {Icon.download}{busy === "mac" ? "Preparing\u2026" : "Download for Mac"}
+          </button>
         </div>
-        {asked && (
-          <p className="note" role="status">
-            The {asked} installer isn't published yet. Until it is, use the terminal option below, or ask the
-            person running this server for the client folder.
-          </p>
+        {error && <p className="error" role="alert">{error}</p>}
+        {done && (
+          <div className="note" role="status" style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <strong>Downloaded. Next steps on {done === "mac" ? "your Mac" : "Windows"}:</strong>
+            <ol style={{ margin: 0, paddingLeft: 20, display: "flex", flexDirection: "column", gap: 4 }}>
+              {STEPS[done].map((s, i) => <li key={i}>{s}</li>)}
+            </ol>
+          </div>
         )}
         <ol style={{ listStyle: "none", margin: 0, padding: 0, display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
           {[
-            "Download. Your server and token are already inside.",
-            "Double-click it. Lattice installs and opens its window.",
-            "Click Volunteer now in the app.",
+            "Download. The server address and access are already inside.",
+            "Run the installer once. It sets everything up in its own folder.",
+            "Start it whenever you want to help. Close the window to stop.",
           ].map((text, i) => (
             <li key={i} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
               <span className="pill dark" style={{ width: 28, height: 28, padding: 0, justifyContent: "center", flex: "0 0 28px" }}>{i + 1}</span>
@@ -36,12 +86,9 @@ export function VolunteerStart() {
             </li>
           ))}
         </ol>
-        <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: "14px 16px", border: "1.5px dashed var(--dash)", borderRadius: 18 }}>
-          <span style={{ fontSize: 14, fontWeight: 500 }}>Prefer the terminal?</span>
-          <code style={{ fontFamily: "ui-monospace, Menlo, monospace", fontSize: 12, lineHeight: 1.7, whiteSpace: "pre-wrap" }}>
-            {`Mac / Linux:  curl -fsSL ${origin}/install.sh | sh\nWindows:      irm ${origin}/install.ps1 | iex`}
-          </code>
-        </div>
+        <p className="muted" style={{ fontSize: 14, margin: 0 }}>
+          Needs Python 3.10 or newer; the installer tells you if it's missing.
+        </p>
       </section>
       <p className="muted" style={{ fontSize: 15 }}>
         Wondering what Lattice does on your laptop? <Link to="/volunteer/safety">Read how it keeps you safe</Link>.

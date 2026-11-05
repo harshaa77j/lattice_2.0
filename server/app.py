@@ -21,6 +21,8 @@ from shared.protocol import (
 )
 from shared.serialization import bytes_to_state_dict
 
+from server.downloads import PLATFORMS, build_volunteer_zip
+
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
 
@@ -43,6 +45,11 @@ def _number(name: str, default: float) -> float:
 NODE_TOKEN = _secret("LATTICE_TOKEN")
 RESEARCHER_KEY = _secret("LATTICE_RESEARCHER_KEY")
 ADMIN_KEY = _secret("LATTICE_ADMIN_KEY")
+# Volunteer downloads: off unless an invite code is set. LATTICE_PUBLIC_URL overrides the
+# server address written into the package (by default it is taken from the request).
+INVITE_CODE = os.getenv("LATTICE_INVITE_CODE", "").strip()
+PUBLIC_URL = os.getenv("LATTICE_PUBLIC_URL", "").strip()
+_zip_cache: dict = {}
 
 SETTINGS = {
     "heartbeat_timeout": _number("LATTICE_HEARTBEAT_TIMEOUT", 20),
@@ -218,6 +225,30 @@ def admin_nodes():
 def admin_events():
     return coord.admin_events()
 
+def _public_url(request: Request) -> str:
+    if PUBLIC_URL:
+        return PUBLIC_URL
+    # Behind Northflank's proxy the original scheme and host arrive in forwarded headers.
+    proto = request.headers.get("x-forwarded-proto", request.url.scheme)
+    host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
+    return f"{proto}://{host}"
+
+
+@app.get("/download/{platform}")
+def download(platform: str, request: Request, code: str = Query(default="")):
+    if not INVITE_CODE:
+        raise HTTPException(status_code=403, detail="volunteer downloads are not enabled on this server")
+    if not secrets.compare_digest(code.encode(), INVITE_CODE.encode()):
+        raise HTTPException(status_code=403, detail="invalid invite code")
+    if platform not in PLATFORMS:
+        raise HTTPException(status_code=404, detail="platform must be 'windows' or 'mac'")
+    url = _public_url(request)
+    key = (platform, url)
+    if key not in _zip_cache:
+        _zip_cache[key] = build_volunteer_zip(platform, url, NODE_TOKEN)
+    return Response(content=_zip_cache[key], media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="lattice-volunteer-{platform}.zip"'})
+    
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if FRONTEND_DIR.is_dir():
     app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
