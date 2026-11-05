@@ -10,13 +10,10 @@ if [ ! -x ".venv/bin/python" ]; then
   exit 1
 fi
 
-echo "Lattice volunteer is starting."
-echo "Keep this window open while you volunteer. Your Mac trains only when a job needs it."
-echo "To stop volunteering, close this window or press Ctrl+C."
-echo
+echo "Opening the Lattice window..."
+echo "You can minimise this Terminal window; closing the Lattice window stops volunteering."
 
-# Keep the Mac awake while volunteering (it may still sleep if the lid is closed).
-caffeinate -i .venv/bin/python -m node.client
+# Keep the Mac awake while the app runs (it may still sleep if the lid is closed).
+caffeinate -i .venv/bin/python -m node.app
 
-echo
 echo "Lattice has stopped. You can close this window."
