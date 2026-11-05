@@ -11,21 +11,58 @@ import io
 import logging
 import os
 import queue
+import re
+import socket
+import sys
 import threading
 import time
 import tkinter as tk
 from tkinter import messagebox
-import socket
+
 import requests
 
-C = None   
-COLORS = {"idle": "#9AA0A6", "waiting": "#3B82F6", "training": "#16A34A",
-          "paused": "#D97706", "offline": "#DC2626"}
-BG, CARD, INK, MUTED = "#F2F2EF", "#FFFFFF", "#17181C", "#6B6F76"
+C = None   # node.client (which loads PyTorch) is imported in main(), after the window appears
+
+# ---------------------------------------------------------------- look and feel
+BG, CARD, INK, MUTED, LINE, DARK = "#F2F2EF", "#FFFFFF", "#17181C", "#6B6F76", "#E3E3DE", "#17181C"
+STATES = {   # state: (pill text, pill colour, headline, detail)
+    "idle": ("Not volunteering", "#9AA0A6", "Ready when you are", "Click Volunteer now to lend this computer."),
+    "waiting": ("Online", "#2563EB", "Waiting for work", "Training starts automatically when a job needs this computer."),
+    "training": ("Training", "#16A34A", "Training", ""),
+    "paused": ("Paused", "#D97706", "Paused", "No new work will be given to this computer until you resume."),
+    "offline": ("Offline", "#DC2626", "Can't reach the server", "Retrying automatically. Check your internet connection."),
+}
+if sys.platform == "darwin":
+    SANS, MONO = "Helvetica Neue", "Menlo"
+elif sys.platform.startswith("win"):
+    SANS, MONO = "Segoe UI", "Consolas"
+else:
+    SANS, MONO = "DejaVu Sans", "DejaVu Sans Mono"
+
+
+def font(size, weight="normal"):
+    return (SANS, size, weight)
+
+
+class FlatButton(tk.Label):
+    """A button drawn by the app, so it looks the same on Windows and macOS."""
+
+    def __init__(self, parent, text, command, primary=True, danger=False):
+        self.colors = (("#FFFFFF", DARK, "#2C2E35") if primary else
+                       ("#B91C1C" if danger else INK, CARD, "#F5F5F2"))
+        fg, bg, _ = self.colors
+        super().__init__(parent, text=text, font=font(12, "bold"), fg=fg, bg=bg, padx=18, pady=10,
+                         cursor="hand2", highlightthickness=0 if primary else 1,
+                         highlightbackground=LINE)
+        self.command = command
+        self.bind("<Button-1>", lambda e: self.command())
+        self.bind("<Enter>", lambda e: self.config(bg=self.colors[2]))
+        self.bind("<Leave>", lambda e: self.config(bg=self.colors[1]))
 
 
 class QueueHandler(logging.Handler):
     """Sends log lines to the window (Tk widgets may only be touched from the main thread)."""
+
     def __init__(self, events):
         super().__init__()
         self.events = events
@@ -34,6 +71,7 @@ class QueueHandler(logging.Handler):
         self.events.put(("log", self.format(record)))
 
 
+# ---------------------------------------------------------------- volunteer loop
 class Worker:
     """Runs the volunteer loop in a background thread; the window controls it."""
 
@@ -60,7 +98,7 @@ class Worker:
         try:
             C.make_session(self.config).post(url, json={"available": flag}, timeout=C.REQUEST_TIMEOUT)
         except requests.RequestException:
-            pass                                # the next heartbeat or poll will show offline
+            pass
 
     def _run(self):
         session = C.make_session(self.config)
@@ -74,12 +112,12 @@ class Worker:
         url = f"{self.config['server']}/task/{self.config['node_id']}"
         while True:
             if not self.active.is_set():
-                self.active.wait()               # paused: sleep until "Volunteer now"
+                self.active.wait()
                 continue
             try:
                 r = session.get(url, timeout=C.REQUEST_TIMEOUT)
                 if r.status_code == 404 and C.is_not_registered(r):
-                    time.sleep(C.POLL_INTERVAL)  # the heartbeat thread re-registers
+                    time.sleep(C.POLL_INTERVAL)
                     continue
                 r.raise_for_status()
                 task = r.json()
@@ -95,62 +133,85 @@ class Worker:
             time.sleep(C.POLL_INTERVAL)
 
 
+# ---------------------------------------------------------------- the window
 class App:
     def __init__(self, root, config):
         self.root, self.config = root, config
         self.events = queue.Queue()
-        self.worker = Worker(config, self.events)
-        self.rounds = 0
+        self.worker = Worker(config, events=self.events)
         self.state = "idle"
+        self.rounds, self.images, self.pending_images = 0, 0, 0
+        self.volunteer_seconds, self.last_tick = 0.0, None
+        self.stripe_x = 0
 
         root.title("Lattice volunteer")
         root.configure(bg=BG)
-        root.minsize(440, 520)
+        root.geometry("440x600")
+        root.minsize(400, 520)
         root.protocol("WM_DELETE_WINDOW", self.stop)
 
-        wrap = tk.Frame(root, bg=BG, padx=22, pady=20)
-        wrap.pack(fill="both", expand=True)
-        tk.Label(wrap, text="lattice", font=("Helvetica", 26, "bold"), bg=BG, fg=INK).pack(anchor="w")
-        tk.Label(wrap, text="Lend your idle computer to train models.", font=("Helvetica", 12),
-                 bg=BG, fg=MUTED).pack(anchor="w", pady=(0, 14))
+        # Header
+        head = tk.Frame(root, bg=DARK, padx=22, pady=16)
+        head.pack(fill="x")
+        tk.Label(head, text="lattice", font=font(22, "bold"), bg=DARK, fg="#FFFFFF").pack(side="left")
+        tk.Label(head, text="volunteer", font=font(12), bg=DARK, fg="#A9ACB3").pack(side="left", padx=(8, 0), pady=(8, 0))
 
-        card = tk.Frame(wrap, bg=CARD, padx=18, pady=16, highlightthickness=0)
+        body = tk.Frame(root, bg=BG, padx=20, pady=18)
+        body.pack(fill="both", expand=True)
+
+        # Status card
+        card = tk.Frame(body, bg=CARD, padx=18, pady=16, highlightthickness=1, highlightbackground=LINE)
         card.pack(fill="x")
-        row = tk.Frame(card, bg=CARD)
-        row.pack(anchor="w")
-        self.dot = tk.Canvas(row, width=16, height=16, bg=CARD, highlightthickness=0)
-        self.dot.pack(side="left", padx=(0, 8))
-        self.dot_id = self.dot.create_oval(2, 2, 14, 14, fill=COLORS["idle"], outline="")
-        self.status = tk.Label(row, text="Not volunteering", font=("Helvetica", 18, "bold"), bg=CARD, fg=INK)
-        self.status.pack(side="left")
-        self.detail = tk.Label(card, text="Click Volunteer now to start.", font=("Helvetica", 12),
-                               bg=CARD, fg=MUTED, justify="left")
-        self.detail.pack(anchor="w", pady=(6, 10))
-        host = config["server"].split("://", 1)[-1]
-        for text in (f"This computer: {config['node_id']} \u00B7 {config['device']} \u00B7 {config['cpu_count']} cores",
-                     f"Server: {host}"):
-            tk.Label(card, text=text, font=("Helvetica", 11), bg=CARD, fg=MUTED).pack(anchor="w")
-        self.count = tk.Label(card, text="Rounds contributed: 0", font=("Helvetica", 12, "bold"), bg=CARD, fg=INK)
-        self.count.pack(anchor="w", pady=(8, 0))
+        self.pill = tk.Label(card, font=font(10, "bold"), fg="#FFFFFF", padx=10, pady=3)
+        self.pill.pack(anchor="w")
+        self.headline = tk.Label(card, font=font(20, "bold"), bg=CARD, fg=INK, anchor="w")
+        self.headline.pack(anchor="w", pady=(10, 2))
+        self.detail = tk.Label(card, font=font(11), bg=CARD, fg=MUTED, anchor="w", justify="left", wraplength=360)
+        self.detail.pack(anchor="w")
+        self.stripe = tk.Canvas(card, height=4, bg=LINE, highlightthickness=0)
+        self.stripe.pack(fill="x", pady=(14, 0))
+        self.stripe_bar = self.stripe.create_rectangle(0, 0, 0, 4, fill=STATES["training"][1], outline="")
 
-        buttons = tk.Frame(wrap, bg=BG)
-        buttons.pack(fill="x", pady=14)
-        self.main_btn = tk.Button(buttons, text="Volunteer now", font=("Helvetica", 13, "bold"),
-                                  command=self.toggle, padx=14, pady=8)
+        # Stats
+        stats = tk.Frame(body, bg=BG)
+        stats.pack(fill="x", pady=12)
+        self.stat_labels = {}
+        for i, (key, title) in enumerate((("rounds", "Rounds"), ("images", "Images trained"), ("time", "Volunteering"))):
+            box = tk.Frame(stats, bg=CARD, padx=12, pady=10, highlightthickness=1, highlightbackground=LINE)
+            box.grid(row=0, column=i, sticky="nsew", padx=(0 if i == 0 else 8, 0))
+            stats.columnconfigure(i, weight=1)
+            value = tk.Label(box, text="0", font=font(17, "bold"), bg=CARD, fg=INK)
+            value.pack(anchor="w")
+            tk.Label(box, text=title, font=font(10), bg=CARD, fg=MUTED).pack(anchor="w")
+            self.stat_labels[key] = value
+
+        # Buttons
+        buttons = tk.Frame(body, bg=BG)
+        buttons.pack(fill="x", pady=(2, 12))
+        self.main_btn = FlatButton(buttons, "Volunteer now", self.toggle, primary=True)
         self.main_btn.pack(side="left")
-        tk.Button(buttons, text="Stop Lattice", font=("Helvetica", 13), fg="#B91C1C",
-                  command=self.stop, padx=14, pady=8).pack(side="right")
+        FlatButton(buttons, "Stop Lattice", self.stop, primary=False, danger=True).pack(side="right")
 
-        tk.Label(wrap, text="Activity", font=("Helvetica", 11, "bold"), bg=BG, fg=MUTED).pack(anchor="w")
-        self.log = tk.Text(wrap, height=9, font=("Menlo", 10), bg=CARD, fg=INK, relief="flat",
-                           wrap="word", state="disabled", padx=8, pady=6)
-        self.log.pack(fill="both", expand=True)
+        # Machine line and activity
+        host = config["server"].split("://", 1)[-1]
+        tk.Label(body, text=f"{config['node_id']} \u00B7 {config['device']} \u00B7 {config['cpu_count']} cores \u00B7 {host}",
+                 font=font(10), bg=BG, fg=MUTED, anchor="w").pack(fill="x")
+        self.toggle_log = tk.Label(body, text="Show activity \u25BE", font=font(10, "bold"), bg=BG, fg=INK, cursor="hand2")
+        self.toggle_log.pack(anchor="w", pady=(10, 4))
+        self.toggle_log.bind("<Button-1>", lambda e: self.flip_log())
+        self.log = tk.Text(body, height=8, font=(MONO, 9), bg=CARD, fg=INK, relief="flat", wrap="word",
+                           state="disabled", padx=8, pady=6, highlightthickness=1, highlightbackground=LINE)
+        self.log_visible = False
 
         handler = QueueHandler(self.events)
         handler.setFormatter(logging.Formatter("%(asctime)s  %(message)s", "%H:%M:%S"))
         logging.getLogger().addHandler(handler)
         logging.getLogger().setLevel(logging.INFO)
+
+        self.show_state("idle")
         self.root.after(200, self.pump)
+        self.root.after(1000, self.tick)
+        self.root.after(40, self.animate)
 
     # ---- controls
     def toggle(self):
@@ -166,47 +227,79 @@ class App:
         self.root.destroy()
         os._exit(0)
 
-    # ---- updates from the worker (main thread only)
-    def set_state(self, state, task=None):
+    def flip_log(self):
+        self.log_visible = not self.log_visible
+        if self.log_visible:
+            self.log.pack(fill="both", expand=True)
+            self.toggle_log.config(text="Hide activity \u25B4")
+        else:
+            self.log.pack_forget()
+            self.toggle_log.config(text="Show activity \u25BE")
+
+    # ---- display
+    def show_state(self, state, task=None):
         if self.state == "paused" and state != "paused" and not self.worker.active.is_set():
             return                               # ignore late messages after pausing
         self.state = state
-        self.dot.itemconfig(self.dot_id, fill=COLORS[state])
+        pill, color, headline, detail = STATES[state]
+        self.pill.config(text=pill.upper(), bg=color)
         if state == "training" and task:
-            self.status.config(text=f"Training round {task['round']}")
-            self.detail.config(text=f"Slice {task['slice_id'] + 1} of {task['num_slices']} \u00B7 {task['model']}")
-        else:
-            self.status.config(text={"waiting": "Waiting for work", "paused": "Paused",
-                                     "offline": "Can't reach the server", "idle": "Not volunteering"}[state])
-            self.detail.config(text={"waiting": "Ready. Training starts when a job needs this computer.",
-                                     "paused": "This computer won't be given new work until you resume.",
-                                     "offline": "Retrying automatically. Check your internet connection.",
-                                     "idle": "Click Volunteer now to start."}[state])
+            headline = f"Training round {task['round']}"
+            detail = f"Slice {task['slice_id'] + 1} of {task['num_slices']} \u00B7 model {task['model']}"
+        self.headline.config(text=headline)
+        self.detail.config(text=detail)
+        if state != "training":
+            self.stripe.coords(self.stripe_bar, 0, 0, 0, 4)
+
+    def animate(self):
+        if self.state == "training":
+            width = max(self.stripe.winfo_width(), 1)
+            self.stripe_x = (self.stripe_x + 6) % (width + 120)
+            self.stripe.coords(self.stripe_bar, self.stripe_x - 120, 0, self.stripe_x, 4)
+        self.root.after(40, self.animate)
+
+    def tick(self):
+        now = time.monotonic()
+        if self.state in ("waiting", "training") and self.last_tick is not None:
+            self.volunteer_seconds += now - self.last_tick
+        self.last_tick = now
+        s = int(self.volunteer_seconds)
+        self.stat_labels["time"].config(text=f"{s // 3600}h {s % 3600 // 60:02d}m" if s >= 3600 else f"{s // 60}m {s % 60:02d}s")
+        self.root.after(1000, self.tick)
 
     def pump(self):
         try:
             while True:
                 kind, *rest = self.events.get_nowait()
                 if kind == "state":
-                    self.set_state(*rest)
+                    self.show_state(*rest)
                 elif kind == "error":
                     messagebox.showerror("Lattice", rest[0])
                 elif kind == "log":
-                    line = rest[0]
-                    if "update accepted" in line:
-                        self.rounds += 1
-                        self.count.config(text=f"Rounds contributed: {self.rounds}")
-                    self.log.config(state="normal")
-                    self.log.insert("end", line + "\n")
-                    self.log.see("end")
-                    if int(self.log.index("end-1c").split(".")[0]) > 300:
-                        self.log.delete("1.0", "50.0")
-                    self.log.config(state="disabled")
+                    self.on_log(rest[0])
         except queue.Empty:
             pass
         self.root.after(200, self.pump)
 
+    def on_log(self, line):
+        m = re.search(r"\((\d+) images", line)
+        if m:
+            self.pending_images = int(m.group(1))
+        if "update accepted" in line:
+            self.rounds += 1
+            self.images += self.pending_images
+            self.pending_images = 0
+            self.stat_labels["rounds"].config(text=str(self.rounds))
+            self.stat_labels["images"].config(text=f"{self.images:,}")
+        self.log.config(state="normal")
+        self.log.insert("end", line + "\n")
+        self.log.see("end")
+        if int(self.log.index("end-1c").split(".")[0]) > 300:
+            self.log.delete("1.0", "50.0")
+        self.log.config(state="disabled")
 
+
+# ---------------------------------------------------------------- start-up
 _instance_lock = None   # kept for the whole run: holds the "already running" lock
 
 
@@ -225,8 +318,7 @@ def main():
     root = tk.Tk()
     root.title("Lattice volunteer")
     root.configure(bg=BG)
-    splash = tk.Label(root, text="Starting Lattice\u2026", font=("Helvetica", 16, "bold"),
-                      bg=BG, fg=INK, padx=60, pady=40)
+    splash = tk.Label(root, text="Starting Lattice\u2026", font=font(16, "bold"), bg=BG, fg=INK, padx=60, pady=40)
     splash.pack()
     root.update()                                  # show the window before the slow import
 
@@ -245,6 +337,7 @@ def main():
     splash.destroy()
     App(root, config)
     root.mainloop()
-    
+
+
 if __name__ == "__main__":
     main()
