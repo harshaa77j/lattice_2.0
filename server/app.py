@@ -21,7 +21,7 @@ from shared.protocol import (
 )
 from shared.serialization import bytes_to_state_dict
 
-from server.downloads import PLATFORMS, build_volunteer_zip
+from server.downloads import PLATFORMS, REPO, build_volunteer_zip
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -248,6 +248,22 @@ def download(platform: str, request: Request, code: str = Query(default="")):
         _zip_cache[key] = build_volunteer_zip(platform, url, NODE_TOKEN)
     return Response(content=_zip_cache[key], media_type="application/zip",
                     headers={"Content-Disposition": f'attachment; filename="lattice-volunteer-{platform}.zip"'})
+    
+def _ps_message(text: str) -> Response:
+    """A tiny PowerShell script that just prints a message, so mistakes are explained in the user's window."""
+    safe = text.replace('"', "'")
+    return Response(content=f'Write-Host "{safe}" -ForegroundColor Red\n', media_type="text/plain; charset=utf-8")
+
+
+@app.get("/install.ps1")
+def install_script(request: Request, code: str = Query(default="")):
+    if not INVITE_CODE:
+        return _ps_message("Volunteer downloads are not enabled on this server yet.")
+    if not secrets.compare_digest(code.encode(), INVITE_CODE.encode()):
+        return _ps_message("That invite code doesn't match. Check the command with the person who invited you.")
+    template = (REPO / "installer" / "windows" / "install.ps1").read_text(encoding="utf-8")
+    script = template.replace("__LATTICE_SERVER__", _public_url(request)).replace("__LATTICE_CODE__", code)
+    return Response(content=script, media_type="text/plain; charset=utf-8")
     
 FRONTEND_DIR = Path(__file__).resolve().parent.parent / "frontend" / "dist"
 if FRONTEND_DIR.is_dir():
