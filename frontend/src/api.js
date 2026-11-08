@@ -27,15 +27,15 @@ export class ApiError extends Error {
   get badKey() { return this.status === 401 || this.status === 403; }
 }
 
-async function request(path, { kind, method = "GET", body, raw = false } = {}) {
+async function request(path, { kind, method = "GET", body, file, raw = false } = {}) {
   const headers = {};
   if (kind === "researcher") headers[RESEARCHER_KEY_HEADER] = getKey("researcher");
   if (kind === "admin") headers[ADMIN_KEY_HEADER] = getKey("admin");
   if (body !== undefined) headers["Content-Type"] = "application/json";
-
+  if (file !== undefined) headers["Content-Type"] = "application/octet-stream";
   let res;
   try {
-    res = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+    res = await fetch(path, { method, headers, body: file !== undefined ? file : body === undefined ? undefined : JSON.stringify(body) });
   } catch {
     throw new ApiError(0, "Can't reach the Lattice server. Check your connection and try again.");
   }
@@ -53,6 +53,8 @@ async function request(path, { kind, method = "GET", body, raw = false } = {}) {
 // D8 contract (DESIGN.md)
 export const api = {
   listModels: () => request("/models"),
+  listDatasets: () => request("/datasets", { kind: "researcher" }),
+  uploadDataset: (name, file) => request(`/datasets?name=${encodeURIComponent(name)}&consent=true`, { kind: "researcher", method: "POST", file }),
   listJobs: () => request("/jobs", { kind: "researcher" }),
   getJob: (id) => request(`/jobs/${encodeURIComponent(id)}`, { kind: "researcher" }),
   createJob: (job) => request("/jobs", { kind: "researcher", method: "POST", body: job }),

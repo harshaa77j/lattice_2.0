@@ -322,7 +322,6 @@ class App:
 # ---------------------------------------------------------------- start-up
 _instance_lock = None   # kept for the whole run: holds the "already running" lock
 
-
 def main():
     global C, _instance_lock
     # One copy at a time: the first app holds this local port; a second one can't bind it.

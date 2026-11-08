@@ -44,6 +44,31 @@ export function NewJob() {
   useEffect(() => {
     api.listModels().then(setModels).catch(() => setModels([]));
   }, []);
+    const [datasets, setDatasets] = useState(null);
+  const [upload, setUpload] = useState({ open: false, file: null, name: "", consent: false, busy: false, error: null, done: null });
+  const loadDatasets = (select) =>
+    api.listDatasets().then((list) => {
+      setDatasets(list);
+      setForm((f) => {
+        if (select) return { ...f, dataset: select };
+        if (f.dataset || !list.length) return f;
+        return { ...f, dataset: (list.find((d) => d.name === "CIFAR-10") || list[0]).id };
+      });
+    }).catch(() => setDatasets([]));
+  useEffect(() => { loadDatasets(); }, []);
+
+  const doUpload = async () => {
+    setUpload((u) => ({ ...u, busy: true, error: null, done: null }));
+    try {
+      const meta = await api.uploadDataset(upload.name.trim(), upload.file);
+      await loadDatasets(meta.id);
+      setUpload({ open: false, file: null, name: "", consent: false, busy: false, error: null,
+        done: `Uploaded "${meta.name}": ${meta.train_count} training and ${meta.test_count} test images in ${meta.num_classes} classes`
+          + (meta.skipped_files ? ` (${meta.skipped_files} files skipped)` : "") + "." });
+    } catch (e) {
+      setUpload((u) => ({ ...u, busy: false, error: e.message }));
+    }
+  };
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -68,7 +93,7 @@ export function NewJob() {
               setBusy(true); setError(null);
               try {
                 await api.createJob({
-                  name: form.name.trim(), dataset: "cifar10", model: form.model,
+                  name: form.name.trim(), dataset: form.dataset || "cifar10", model: form.model,
                   target_accuracy: Number(form.target) / 100,
                   max_rounds: Number(form.maxRounds), local_epochs: Number(form.epochs),
                 });
@@ -87,12 +112,56 @@ export function NewJob() {
             <div className="row-wrap" style={{ gap: 28 }}>
               <div style={{ flex: "1 1 320px", display: "flex", flexDirection: "column", gap: 18 }}>
                 <label className="field">Job name<input value={form.name} onChange={set("name")} maxLength={64} /></label>
-                <div className="field-group">
+                                <div className="field-group">
                   <span>Dataset</span>
                   <div className="chips">
-                    <button type="button" className="chip on" aria-pressed="true">CIFAR-10 · 50,000 images · 10 classes</button>
-                    <button type="button" className="chip" disabled>Your data (soon)</button>
+                    {datasets === null && <span className="muted small">Loading datasets…</span>}
+                    {datasets?.length === 0 && (
+                      <button type="button" className="chip on" aria-pressed="true">CIFAR-10 (built-in)</button>
+                    )}
+                    {datasets?.map((d) => (
+                      <button key={d.id} type="button" className={`chip${form.dataset === d.id ? " on" : ""}`}
+                        aria-pressed={form.dataset === d.id}
+                        onClick={() => setForm((f) => ({ ...f, dataset: d.id }))}>
+                        {d.name} · {(d.train_count + d.test_count).toLocaleString()} images · {d.num_classes} classes
+                      </button>
+                    ))}
+                    <button type="button" className={`chip${upload.open ? " on" : ""}`}
+                      onClick={() => setUpload((u) => ({ ...u, open: !u.open, error: null }))}>
+                      + Upload your data
+                    </button>
                   </div>
+                  {upload.done && <span className="muted small">{upload.done}</span>}
+                  {upload.open && (
+                    <div className="note" style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+                      <span className="small">
+                        A <strong>.zip with one folder per class</strong> (for example <code>cats/</code> and <code>dogs/</code>),
+                        at least 2 classes with 5 or more images each, up to 200 MB. Images are resized to 32×32 pixels,
+                        and 10% of each class is kept aside for testing.
+                      </span>
+                      <label className="field">Dataset name
+                        <input value={upload.name} maxLength={64} placeholder="e.g. Leaf diseases"
+                          onChange={(e) => setUpload((u) => ({ ...u, name: e.target.value }))} />
+                      </label>
+                      <input type="file" accept=".zip,application/zip"
+                        onChange={(e) => setUpload((u) => ({ ...u, file: e.target.files?.[0] || null,
+                          name: u.name || (e.target.files?.[0]?.name || "").replace(/\.zip$/i, "") }))} />
+                      <label className="small" style={{ display: "flex", gap: 8, alignItems: "flex-start" }}>
+                        <input type="checkbox" checked={upload.consent}
+                          onChange={(e) => setUpload((u) => ({ ...u, consent: e.target.checked }))} />
+                        <span>I understand that volunteers' computers will receive and process these images while training.
+                          Don't upload private or sensitive images.</span>
+                      </label>
+                      {upload.error && <p className="error" role="alert">{upload.error}</p>}
+                      <div>
+                        <button type="button" className="btn"
+                          disabled={!upload.file || !upload.name.trim() || !upload.consent || upload.busy}
+                          onClick={doUpload}>
+                          {upload.busy ? "Uploading and preparing…" : "Upload dataset"}
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
                 <div className="field-group">
                   <span>Model</span>
