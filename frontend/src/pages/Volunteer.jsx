@@ -37,6 +37,18 @@ export function VolunteerStart() {
   const [error, setError] = useState(null);
   const [done, setDone] = useState(null);
 
+  const [copied, setCopied] = useState(false);
+  const command = `irm "${window.location.origin}/install.ps1?code=${encodeURIComponent(code.trim())}" | iex`;
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError("Couldn't copy automatically. Select the line and copy it with Ctrl+C.");
+    }
+  };
+
   const get = async (platform) => {
     setError(null); setDone(null); setBusy(platform);
     try { await downloadPackage(platform, code.trim()); setDone(platform); }
@@ -57,6 +69,22 @@ export function VolunteerStart() {
           <input value={code} onChange={(e) => setCode(e.target.value)} placeholder="From the person who invited you"
                  autoComplete="off" spellCheck={false} />
         </label>
+        {code.trim() && (
+          <div className="note" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <strong>Windows: install in one step (recommended)</strong>
+            <span className="small">
+              Open the Start menu, type <strong>PowerShell</strong> and press Enter. Paste this line and press Enter.
+              It installs everything Lattice needs (including Python, if missing), adds a <strong>Lattice</strong> icon
+              to your Desktop, and opens the app. About 10 minutes the first time.
+            </span>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <code style={{ flex: "1 1 320px", padding: "10px 12px", background: "#FFFFFF", border: "1px solid #E3E3DE",
+                             borderRadius: 10, fontSize: 13, overflowX: "auto", whiteSpace: "nowrap" }}>{command}</code>
+              <button type="button" className="btn secondary" onClick={copy}>{copied ? "Copied \u2713" : "Copy"}</button>
+            </div>
+          </div>
+        )}
+        <span className="muted small">Or download the package and install it yourself:</span>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
           <button type="button" className="btn" disabled={!code.trim() || busy} onClick={() => get("windows")}>
             {Icon.download}{busy === "windows" ? "Preparing\u2026" : "Download for Windows"}
