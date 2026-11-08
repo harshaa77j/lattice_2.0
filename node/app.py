@@ -233,7 +233,9 @@ class App:
 
     # ---- controls
     def toggle(self):
-        if self.state in ("idle", "paused"):
+        # Decide from what the worker is actually doing, not from the status on screen,
+        # which lags behind for a few seconds while registering.
+        if not self.worker.active.is_set():
             self.worker.volunteer()
             self.main_btn.config(text="Pause")
         else:
