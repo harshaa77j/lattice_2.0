@@ -115,7 +115,8 @@ export function VolunteerStart() {
           ))}
         </ol>
         <p className="muted" style={{ fontSize: 14, margin: 0 }}>
-          Needs Python 3.10 or newer; the installer tells you if it's missing.
+          The one-step installer sets up Python by itself. The downloaded package needs Python 3.10 or newer;
+          its installer tells you if it's missing.
         </p>
       </section>
       <p className="muted" style={{ fontSize: 15 }}>
