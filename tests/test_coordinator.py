@@ -24,7 +24,7 @@ class FakeEvaluator:
         self.accuracies = list(accuracies)
         self.calls = []
 
-    def __call__(self, model_name, state_dict, full):
+    def __call__(self, model_name, state_dict, full, **kwargs):
         self.calls.append(full)
         return self.accuracies.pop(0) if len(self.accuracies) > 1 else self.accuracies[0]
 
@@ -233,3 +233,47 @@ def test_reregistering_keeps_history():
     coord.tick()
     coord.register("a", 4, "cpu")                    # e.g. after a client restart
     assert coord.nodes["a"].rounds_completed == 1
+    
+def test_volunteers_keep_their_slice_between_rounds():
+    coord, clock = make_coord()
+    start_job(coord)
+    for nid in "abc":
+        coord.register(nid, 4, "cpu")
+    coord.tick()
+    first = dict(coord.round.assignments)
+    clock.advance(5)
+    for nid in "cab":                                # report in a different order...
+        task = coord.get_task(nid)
+        coord.submit_update(nid, task["round"], trained_weights(coord))
+        clock.advance(3)                             # ...so their measured speeds differ
+    coord.tick()                                     # close round 1
+    coord.tick()                                     # open round 2
+    assert coord.round.number == 2
+    assert coord.round.assignments == first          # nobody has to fetch new data
+
+
+class FakeStore:
+    """Stands in for server.datasets.DatasetStore: one 2-class dataset of 100 training images."""
+    def meta(self, dataset_id):
+        if dataset_id != "pets-1":
+            raise ValueError(f"no dataset '{dataset_id}'")
+        return {"id": "pets-1", "name": "Pets", "num_classes": 2, "train_count": 100}
+
+
+def test_job_on_a_stored_dataset():
+    clock = FakeClock()
+    coord = Coordinator(FakeEvaluator([0.6]), checkpoint_dir=None, clock=clock, dataset_store=FakeStore())
+    job = coord.create_job("pets", "pets-1", "cnn_small", 0.9, 3, 1)
+    assert job.num_classes == 2 and job.dataset_name == "Pets"
+    final_layer = bytes_to_state_dict(job.weights)["layers.12.bias"]
+    assert final_layer.shape == (2,)                 # model built with 2 outputs
+    coord.register("a", 4, "cpu")
+    coord.register("b", 4, "cpu")
+    coord.tick()
+    task = coord.get_task("a")
+    assert task["dataset"] == "pets-1" and task["num_classes"] == 2
+    coord.submit_update("a", task["round"], trained_weights(coord))
+    _, n = coord.round.updates["a"]
+    assert n == 50                                   # half of this dataset's 100 images, not of CIFAR-10
+    with pytest.raises(ValueError):
+        coord.create_job("x", "no-such-dataset", "cnn_small", 0.9, 3, 1)

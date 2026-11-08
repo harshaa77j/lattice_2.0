@@ -2,7 +2,7 @@ import torch
 from torch import nn
 
 class SmallCNN(nn.Module):
-    def __init__(self):
+    def __init__(self, num_classes: int = 10):
         super().__init__()
         self.layers = nn.Sequential(
             nn.Conv2d(3,32,kernel_size=3,padding=1), 
@@ -17,7 +17,7 @@ class SmallCNN(nn.Module):
             nn.Flatten(),
             nn.Linear(128*4*4, 256),
             nn.ReLU(),
-            nn.Linear(256, 10)
+            nn.Linear(256, num_classes)
         )
           
     def forward(self, x):

@@ -58,10 +58,10 @@ class ModelSpec:
     def ready(self) -> bool:
         return self.build is not None
 
-    def make_model(self) -> nn.Module:
+    def make_model(self, num_classes: int = 10) -> nn.Module:
         if not self.ready:
             raise ValueError(f"model '{self.name}' is not available yet")
-        return self.build()
+        return self.build(num_classes=num_classes)
 
     def lr_at(self, progress: float) -> float:
         """Learning rate at a point in training: progress 0.0 = start, 1.0 = end.

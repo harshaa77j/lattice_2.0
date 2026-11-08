@@ -20,8 +20,12 @@ from shared.protocol import (
     NOT_REGISTERED, RESEARCHER_KEY_HEADER,
 )
 from shared.serialization import bytes_to_state_dict
+import numpy as np
 
 from server.downloads import PLATFORMS, REPO, build_volunteer_zip
+import tempfile
+from starlette.concurrency import run_in_threadpool
+from server.datasets import MAX_ZIP_BYTES, DatasetError, DatasetStore
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -50,6 +54,8 @@ ADMIN_KEY = _secret("LATTICE_ADMIN_KEY")
 INVITE_CODE = os.getenv("LATTICE_INVITE_CODE", "").strip()
 PUBLIC_URL = os.getenv("LATTICE_PUBLIC_URL", "").strip()
 _zip_cache: dict = {}
+datasets = DatasetStore(os.getenv("LATTICE_DATASET_DIR", "datasets"))
+MAX_IMPORT_BYTES = 400 * 1024 * 1024
 
 SETTINGS = {
     "heartbeat_timeout": _number("LATTICE_HEARTBEAT_TIMEOUT", 20),
@@ -58,11 +64,12 @@ SETTINGS = {
 }
 
 coord = Coordinator(
-    evaluate_fn=Evaluator(subset_size=int(_number("LATTICE_EVAL_SUBSET", 2000))),
+    evaluate_fn=Evaluator(subset_size=int(_number("LATTICE_EVAL_SUBSET", 2000)), dataset_store=datasets),
     heartbeat_timeout=SETTINGS["heartbeat_timeout"],
     round_deadline=SETTINGS["round_deadline"],
     min_nodes=SETTINGS["min_nodes"],
     checkpoint_dir=os.getenv("LATTICE_CHECKPOINT_DIR", "checkpoints"),
+    dataset_store=datasets,
 )
 
 @asynccontextmanager
@@ -99,7 +106,7 @@ class Availability(BaseModel):
 
 class JobCreate(BaseModel):
     name: str = Field(min_length=1, max_length=64)
-    dataset: Literal["cifar10"] = "cifar10"
+    dataset: str = Field(default="cifar10", min_length=1, max_length=80)
     model: str = Field(min_length=1, max_length=64)
     target_accuracy: float = Field(gt=0, lt=1)
     max_rounds: int = Field(ge=1, le=200)
@@ -233,7 +240,74 @@ def _public_url(request: Request) -> str:
     host = request.headers.get("x-forwarded-host") or request.headers.get("host") or request.url.netloc
     return f"{proto}://{host}"
 
+# ----------------------------------------------------------------- datasets
+async def _body_to_file(request: Request, limit: int) -> Path:
+    """Stream the request body to a temporary file on the dataset volume, never all into memory."""
+    declared = int(request.headers.get("content-length") or 0)
+    if declared > limit:
+        raise HTTPException(status_code=413, detail=f"upload is larger than {limit // (1024 * 1024)} MB")
+    fd, name = tempfile.mkstemp(dir=datasets.root, suffix=".upload")
+    size = 0
+    with os.fdopen(fd, "wb") as f:
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > limit:
+                f.close()
+                os.unlink(name)
+                raise HTTPException(status_code=413, detail=f"upload is larger than {limit // (1024 * 1024)} MB")
+            f.write(chunk)
+    return Path(name)
 
+
+@app.get("/datasets", dependencies=[Depends(require_researcher_key)])
+def list_datasets():
+    return datasets.list()
+
+
+@app.post("/datasets", dependencies=[Depends(require_researcher_key)])
+async def upload_dataset(request: Request, name: str = Query(min_length=1, max_length=64),
+                         consent: bool = Query(default=False)):
+    """A researcher's zip of class folders, sent as the raw request body."""
+    if not consent:
+        raise HTTPException(status_code=422, detail="please confirm that volunteers will process these images")
+    path = await _body_to_file(request, MAX_ZIP_BYTES)
+    try:
+        meta = await run_in_threadpool(datasets.build_from_zip, name, path.read_bytes())
+    except DatasetError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    finally:
+        path.unlink(missing_ok=True)
+    return meta
+
+
+@app.post("/admin/datasets/import", dependencies=[Depends(require_admin_key)])
+async def import_dataset(request: Request, name: str = Query(min_length=1, max_length=64),
+                         classes: str = Query(min_length=1)):
+    """Ready-made arrays (an .npz with train_images/train_labels/test_images/test_labels)."""
+    path = await _body_to_file(request, MAX_IMPORT_BYTES)
+    try:
+        def load_and_add():
+            with np.load(path, allow_pickle=False) as z:
+                return datasets.add_arrays(name, classes.split(","), z["train_images"], z["train_labels"],
+                                           z["test_images"], z["test_labels"], source="import")
+        return await run_in_threadpool(load_and_add)
+    except (KeyError, ValueError) as e:
+        raise HTTPException(status_code=422, detail=f"not a valid dataset file ({e})")
+    finally:
+        path.unlink(missing_ok=True)
+
+
+@app.get("/datasets/{dataset_id}/slice", dependencies=[Depends(require_node_token)])
+def dataset_slice(dataset_id: str, slice_id: int = Query(ge=0), num_slices: int = Query(ge=1, le=1000)):
+    if slice_id >= num_slices:
+        raise HTTPException(status_code=422, detail="slice_id must be smaller than num_slices")
+    try:
+        data = datasets.slice_bytes(dataset_id, slice_id, num_slices)
+    except DatasetError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return Response(content=data, media_type="application/octet-stream",
+                    headers={"X-Lattice-Dataset": dataset_id})
+    
 @app.get("/download/{platform}")
 def download(platform: str, request: Request, code: str = Query(default="")):
     if not INVITE_CODE:

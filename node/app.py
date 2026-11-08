@@ -43,7 +43,25 @@ else:
 def font(size, weight="normal"):
     return (SANS, size, weight)
 
+_mac_awake = None   # the caffeinate process on macOS, while volunteering
 
+def keep_awake(on: bool):
+    """Stop the computer sleeping while Lattice volunteers. The screen may still turn off;
+    the computer, and its network connection, stay on. Released when the app pauses or quits."""
+    global _mac_awake
+    if sys.platform.startswith("win"):
+        import ctypes
+        ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
+        ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | (ES_SYSTEM_REQUIRED if on else 0))
+    elif sys.platform == "darwin":
+        import subprocess
+        if on and _mac_awake is None:
+            # -w: caffeinate exits by itself when this app's process ends, even after a crash.
+            _mac_awake = subprocess.Popen(["caffeinate", "-i", "-w", str(os.getpid())])
+        elif not on and _mac_awake is not None:
+            _mac_awake.terminate()
+            _mac_awake = None
+            
 class FlatButton(tk.Label):
     """A button drawn by the app, so it looks the same on Windows and macOS."""
 
@@ -240,7 +258,7 @@ class App:
     def show_state(self, state, task=None):
         if self.state == "paused" and state != "paused" and not self.worker.active.is_set():
             return                               # ignore late messages after pausing
-        self.state = state
+        keep_awake(state in ("waiting", "training", "offline"))
         pill, color, headline, detail = STATES[state]
         self.pill.config(text=pill.upper(), bg=color)
         if state == "training" and task:

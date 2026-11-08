@@ -7,8 +7,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional
-import numpy as np
 
+import numpy as np
 import torch
 
 from scheduler.select import choose_nodes
@@ -20,7 +20,9 @@ from shared.serialization import state_dict_to_bytes
 log = logging.getLogger("lattice.coordinator")
 
 CIFAR10_TRAIN_SIZE = 50_000
+BUILTIN_DATASET = "cifar10"
 ACTIVE = ("waiting_for_nodes", "training")
+
 
 def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -29,60 +31,68 @@ def utc_now_iso() -> str:
 class JobConflict(Exception):
     """A job is already running (v1 runs one job at a time)."""
 
+
 @dataclass
 class Node:
     node_id: str
     cpu_count: int
     device: str
-    registered_at: float                
+    registered_at: float                 # clock time of first registration
     last_seen: float
     available: bool = True
     rounds_assigned: int = 0
     rounds_completed: int = 0
-    outcomes: deque = field(default_factory=lambda: deque(maxlen=10))  
+    outcomes: deque = field(default_factory=lambda: deque(maxlen=10))   # True = reported in time
     avg_round_s: Optional[float] = None
 
     @property
     def reliability(self) -> float:
         return self.rounds_completed / self.rounds_assigned if self.rounds_assigned else 1.0
 
+
 @dataclass
 class Job:
     job_id: str
     name: str
-    dataset: str
+    dataset: str                         # "cifar10" or a stored dataset id
     model: str
     target_accuracy: float
     max_rounds: int
     local_epochs: int
     created_at: str
     status: str = "waiting_for_nodes"
-    current_round: int = 0              
+    current_round: int = 0               # rounds finished so far
     best_accuracy: Optional[float] = None
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     history: list = field(default_factory=list)
-    weights: bytes = b""               
+    weights: bytes = b""                 # current global model (serialized)
+    num_classes: int = 10
+    train_count: int = CIFAR10_TRAIN_SIZE
+    dataset_name: str = "CIFAR-10"
+
 
 @dataclass
 class Round:
     job_id: str
     number: int
-    assignments: dict                   
+    assignments: dict                    # node_id -> slice_id
     num_slices: int
     opened_at: float
     deadline: float
-    updates: dict = field(default_factory=dict)   
+    updates: dict = field(default_factory=dict)   # node_id -> (state_dict, n_samples)
+
 
 class Coordinator:
     def __init__(
         self,
-        evaluate_fn: Callable[[str, dict, bool], float],
+        evaluate_fn: Callable,
         heartbeat_timeout: float = 20.0,
         round_deadline: float = 180.0,
         min_nodes: int = 2,
         checkpoint_dir: Optional[str] = "checkpoints",
         clock: Callable[[], float] = time.monotonic,
+        dataset_store=None,
     ):
         self.evaluate_fn = evaluate_fn
         self.heartbeat_timeout = heartbeat_timeout
@@ -90,6 +100,7 @@ class Coordinator:
         self.min_nodes = min_nodes
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
         self.clock = clock
+        self.dataset_store = dataset_store
 
         self.lock = threading.Lock()
         self.nodes: dict[str, Node] = {}
@@ -98,7 +109,8 @@ class Coordinator:
         self.events: deque = deque(maxlen=200)
         self.started_at = clock()
         self.last_scheduler = "heuristic"
-        self._shape_cache: dict[str, dict] = {}
+        self._shape_cache: dict = {}
+        self._last_slices: dict = {}          # job_id -> (num_slices, {node_id: slice_id})
 
     # ---------------------------------------------------------------- helpers
     def _event(self, kind: str, text: str):
@@ -136,11 +148,29 @@ class Coordinator:
             "avg_round_s": round(node.avg_round_s, 1) if node.avg_round_s else None,
         }
 
-    def _reference_shapes(self, model_name: str) -> dict:
-        if model_name not in self._shape_cache:
-            sd = get_spec(model_name).make_model().state_dict()
-            self._shape_cache[model_name] = {k: (tuple(v.shape), v.dtype) for k, v in sd.items()}
-        return self._shape_cache[model_name]
+    def _reference_shapes(self, model_name: str, num_classes: int) -> dict:
+        key = (model_name, num_classes)
+        if key not in self._shape_cache:
+            sd = get_spec(model_name).make_model(num_classes).state_dict()
+            self._shape_cache[key] = {k: (tuple(v.shape), v.dtype) for k, v in sd.items()}
+        return self._shape_cache[key]
+
+    def _assign_slices(self, job: Job, chosen: list) -> dict:
+        """Keep each volunteer on the slice it had last round (it already has that data);
+        newcomers get the free slices. Without stickiness a volunteer would re-download data."""
+        n = len(chosen)
+        prev_n, prev = self._last_slices.get(job.job_id, (None, {}))
+        assignments = {}
+        if prev_n == n:
+            for nid in chosen:
+                if nid in prev:
+                    assignments[nid] = prev[nid]
+        free = [s for s in range(n) if s not in assignments.values()]
+        for nid in chosen:
+            if nid not in assignments:
+                assignments[nid] = free.pop(0)
+        self._last_slices[job.job_id] = (n, dict(assignments))
+        return assignments
 
     # ----------------------------------------------------------------- nodes
     def register(self, node_id: str, cpu_count: int, device: str, available: bool = True):
@@ -182,16 +212,25 @@ class Coordinator:
     def create_job(self, name: str, dataset: str, model: str, target_accuracy: float,
                    max_rounds: int, local_epochs: int) -> Job:
         spec = get_spec(model)                       # raises ValueError for unknown models
+        if dataset == BUILTIN_DATASET:
+            num_classes, train_count, dataset_name = 10, CIFAR10_TRAIN_SIZE, "CIFAR-10"
+        else:
+            if self.dataset_store is None:
+                raise ValueError("this server has no dataset store")
+            meta = self.dataset_store.meta(dataset)  # raises (a ValueError) if it doesn't exist
+            num_classes, train_count, dataset_name = meta["num_classes"], meta["train_count"], meta["name"]
         torch.manual_seed(0)
-        initial = state_dict_to_bytes(spec.make_model().state_dict())
+        initial = state_dict_to_bytes(spec.make_model(num_classes).state_dict())
         with self.lock:
             if self._active_job():
                 raise JobConflict("a job is already running; wait for it to finish")
             job = Job(job_id=uuid.uuid4().hex[:8], name=name, dataset=dataset, model=model,
                       target_accuracy=target_accuracy, max_rounds=max_rounds,
-                      local_epochs=local_epochs, created_at=utc_now_iso(), weights=initial)
+                      local_epochs=local_epochs, created_at=utc_now_iso(), weights=initial,
+                      num_classes=num_classes, train_count=train_count, dataset_name=dataset_name)
             self.jobs[job.job_id] = job
-            self._event("info", f"job {name} submitted ({model}, target {target_accuracy:.0%})")
+            self._event("info", f"job {name} submitted ({model} on {dataset_name}, "
+                                f"target {target_accuracy:.0%})")
             return job
 
     # ---------------------------------------------------------- node protocol
@@ -208,6 +247,8 @@ class Coordinator:
                 "status": "train",
                 "job_id": job.job_id,
                 "model": job.model,
+                "dataset": job.dataset,
+                "num_classes": job.num_classes,
                 "round": r.number,
                 "slice_id": r.assignments[node_id],
                 "num_slices": r.num_slices,
@@ -227,10 +268,10 @@ class Coordinator:
         """Problem description if the weights don't fit the open round's model, else None."""
         with self.lock:
             r = self.round
-            model_name = self.jobs[r.job_id].model if r else None
-        if model_name is None:
+            job = self.jobs[r.job_id] if r else None
+        if job is None:
             return None                  # submit_update will reject it as "not open"
-        ref = self._reference_shapes(model_name)
+        ref = self._reference_shapes(job.model, job.num_classes)
         if set(state_dict) != set(ref):
             return "weights don't match the job's model (different layers)"
         for key, (shape, _) in ref.items():
@@ -249,8 +290,9 @@ class Coordinator:
                 return "not_selected"
             if node_id in r.updates:
                 return "duplicate"
+            job = self.jobs[r.job_id]
             # The server trusts its own count, never the client's claim.
-            n = len(slice_data(CIFAR10_TRAIN_SIZE, r.assignments[node_id], r.num_slices))
+            n = len(slice_data(job.train_count, r.assignments[node_id], r.num_slices))
             if claimed_samples is not None and claimed_samples != n:
                 log.warning("%s claimed %s samples, slice has %s; using %s",
                             node_id, claimed_samples, n, n)
@@ -301,7 +343,7 @@ class Coordinator:
             now = self.clock()
             number = job.current_round + 1
             self.round = Round(job_id=job.job_id, number=number,
-                               assignments={nid: i for i, nid in enumerate(chosen)},
+                               assignments=self._assign_slices(job, chosen),
                                num_slices=len(chosen), opened_at=now, deadline=now + self.round_deadline)
             for nid in chosen:
                 self.nodes[nid].rounds_assigned += 1
@@ -331,6 +373,9 @@ class Coordinator:
         return {"round": r, "updates": list(r.updates.values()), "missing": pending,
                 "seconds": self.clock() - r.opened_at}
 
+    def _evaluate(self, job: Job, state: dict, full: bool) -> float:
+        return self.evaluate_fn(job.model, state, full, dataset=job.dataset, num_classes=job.num_classes)
+
     def _finish_round(self, job: Job, closing: dict):
         """Aggregate and evaluate outside the lock, then record the result."""
         r, updates = closing["round"], closing["updates"]
@@ -340,10 +385,10 @@ class Coordinator:
             return
 
         new_state = fedavg(updates)
-        accuracy = self.evaluate_fn(job.model, new_state, False)
+        accuracy = self._evaluate(job, new_state, False)
         reached = accuracy >= job.target_accuracy
         if reached:
-            accuracy = self.evaluate_fn(job.model, new_state, True)   # confirm on the full test set
+            accuracy = self._evaluate(job, new_state, True)   # confirm on the full test set
             reached = accuracy >= job.target_accuracy
         new_bytes = state_dict_to_bytes(new_state)
         self._save_checkpoint(job.job_id, r.number, new_bytes)
@@ -394,7 +439,8 @@ class Coordinator:
 
     def _job_view(self, job: Job, detail: bool) -> dict:
         shown_round = self.round.number if self.round and self.round.job_id == job.job_id else job.current_round
-        view = {"job_id": job.job_id, "name": job.name, "dataset": job.dataset, "model": job.model,
+        view = {"job_id": job.job_id, "name": job.name, "dataset": job.dataset,
+                "dataset_name": job.dataset_name, "num_classes": job.num_classes, "model": job.model,
                 "status": job.status, "current_round": shown_round, "max_rounds": job.max_rounds,
                 "target_accuracy": job.target_accuracy, "local_epochs": job.local_epochs,
                 "best_accuracy": job.best_accuracy, "started_at": job.started_at,
@@ -461,53 +507,45 @@ class Coordinator:
 EVAL_FILE = Path(__file__).resolve().parent / "eval" / "cifar10_test.npz"
 
 
-class _ArrayDataset(torch.utils.data.Dataset):
-    """Test images held in memory as raw pixels, normalised on access."""
-
-    def __init__(self, images, labels):
-        from shared.data import get_transform
-        self.images, self.labels = images, labels
-        self.transform = get_transform(augment=False)
-
-    def __len__(self):
-        return len(self.labels)
-
-    def __getitem__(self, i):
-        return self.transform(self.images[i]), int(self.labels[i])
-
-
 class Evaluator:
     """Server-side evaluation: a fixed test subset each round, the full set to confirm.
 
-    Reads the CIFAR-10 test set from server/eval/cifar10_test.npz, committed to the
-    repository, so the server never downloads anything at runtime.
+    The built-in CIFAR-10 path reads server/eval/cifar10_test.npz (committed to the repo);
+    stored datasets use their own held-out split from the dataset store.
     """
 
-    def __init__(self, subset_size: int = 2000, path: Path = EVAL_FILE):
+    def __init__(self, subset_size: int = 2000, path: Path = EVAL_FILE, dataset_store=None):
         self.subset_size = subset_size
         self.path = Path(path)
-        self._test = None
+        self.dataset_store = dataset_store
+        self._cache: dict = {}
         self._lock = threading.Lock()
 
-    def _dataset(self):
+    def _dataset(self, dataset: str):
+        from shared.datasets import ArrayDataset
         with self._lock:
-            if self._test is None:
-                if not self.path.is_file():
-                    raise FileNotFoundError(
-                        f"{self.path} is missing. Create it with: python -m tools.make_eval_set")
-                with np.load(self.path) as data:           # allow_pickle is off by default
-                    self._test = _ArrayDataset(data["images"], data["labels"])
-                log.info("Loaded %d evaluation images from %s", len(self._test), self.path.name)
-            return self._test
+            if dataset not in self._cache:
+                if dataset == BUILTIN_DATASET:
+                    if not self.path.is_file():
+                        raise FileNotFoundError(
+                            f"{self.path} is missing. Create it with: python -m tools.make_eval_set")
+                    with np.load(self.path) as data:      # allow_pickle is off by default
+                        images, labels = data["images"], data["labels"]
+                else:
+                    images, labels = self.dataset_store.test_arrays(dataset)
+                self._cache[dataset] = ArrayDataset(images, labels.astype(np.int64))
+                log.info("Loaded %d evaluation images for %s", len(labels), dataset)
+            return self._cache[dataset]
 
-    def __call__(self, model_name: str, state_dict: dict, full: bool) -> float:
+    def __call__(self, model_name: str, state_dict: dict, full: bool,
+                 dataset: str = BUILTIN_DATASET, num_classes: int = 10) -> float:
         from torch.utils.data import DataLoader, Subset
         from shared.protocol import DATA_SEED
         from shared.training import evaluate
 
-        model = get_spec(model_name).make_model()
+        model = get_spec(model_name).make_model(num_classes)
         model.load_state_dict(state_dict)
-        data = self._dataset()
+        data = self._dataset(dataset)
         if not full and self.subset_size and self.subset_size < len(data):
             g = torch.Generator().manual_seed(DATA_SEED + 1)
             data = Subset(data, torch.randperm(len(data), generator=g)[: self.subset_size].tolist())

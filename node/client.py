@@ -10,6 +10,8 @@ import requests
 import torch
 from dotenv import load_dotenv
 from torch.utils.data import DataLoader
+from pathlib import Path
+from shared.datasets import ArrayDataset, unpack_arrays
 
 from shared.data import get_cifar10, get_slice
 from shared.models import get_spec
@@ -124,17 +126,60 @@ def heartbeat_loop(config: dict):
             log.exception("Heartbeat: unexpected error %s", type(e).__name__)
         time.sleep(HEARTBEAT_INTERVAL)
 
-_datasets: dict = {}
+# --------------------------------------------------------------- training
+SLICE_TIMEOUT = 900          # a slice can be ~50 MB on a slow connection
+CACHE_DIR = Path("data") / "lattice"
+_builtin: dict = {}          # the old CIFAR-10 path, per augmentation setting
+_loaded: dict = {}           # (dataset, slice_id, num_slices) -> (images, labels) kept in memory
 
-def training_data(augment: bool):
-    if augment not in _datasets:
-        _datasets[augment] = get_cifar10(train=True, augment=augment)
-    return _datasets[augment]
+
+def builtin_cifar(augment: bool):
+    """The original path: CIFAR-10 from torchvision. Used only for dataset 'cifar10'."""
+    if augment not in _builtin:
+        _builtin[augment] = get_cifar10(train=True, augment=augment)
+    return _builtin[augment]
+
+
+def stored_slice(config: dict, session: requests.Session, dataset: str, slice_id: int, num_slices: int):
+    """This volunteer's share of a dataset stored on the server: downloaded once, then cached on disk."""
+    key = (dataset, slice_id, num_slices)
+    if key in _loaded:
+        return _loaded[key]
+    path = CACHE_DIR / f"{dataset}__{slice_id}of{num_slices}.npz"
+    if path.is_file():
+        log.info("Using this computer's saved share of %s", dataset)
+    else:
+        log.info("Downloading this computer's share of %s (only once for this job)...", dataset)
+        start = time.perf_counter()
+        r = session.get(f"{config['server']}/datasets/{dataset}/slice",
+                        params={"slice_id": slice_id, "num_slices": num_slices}, timeout=SLICE_TIMEOUT)
+        r.raise_for_status()
+        CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        for old in CACHE_DIR.glob(f"{dataset}__*.npz"):    # a different share of the same dataset
+            old.unlink(missing_ok=True)
+        tmp = path.with_suffix(".part")
+        tmp.write_bytes(r.content)
+        tmp.replace(path)                                  # complete files only, even if interrupted
+        log.info("Downloaded %.1f MB in %.0f s", len(r.content) / 1e6, time.perf_counter() - start)
+    _loaded.clear()                                        # keep at most one share in memory
+    _loaded[key] = unpack_arrays(path.read_bytes())
+    return _loaded[key]
+
+
+def training_data(config: dict, session: requests.Session, task: dict, augment: bool):
+    dataset = task.get("dataset", "cifar10")
+    if dataset == "cifar10":
+        return get_slice(builtin_cifar(augment), task["slice_id"], task["num_slices"])
+    images, labels = stored_slice(config, session, dataset, task["slice_id"], task["num_slices"])
+    return ArrayDataset(images, labels, augment=augment)
+
 
 def run_task(config: dict, session: requests.Session, task: dict):
     spec = get_spec(task["model"])
     device = config["device"]
     rnd, slice_id, num_slices = task["round"], task["slice_id"], task["num_slices"]
+
+    part = training_data(config, session, task, spec.augment)   # before the weights: may take a while
 
     r = session.get(f"{config['server']}/weights", timeout=TRANSFER_TIMEOUT)
     if r.status_code == 409:
@@ -145,13 +190,12 @@ def run_task(config: dict, session: requests.Session, task: dict):
         log.info("Weights are for a different round; skipping round %d", rnd)
         return
 
-    model = spec.make_model()
+    model = spec.make_model(task.get("num_classes", 10))
     model.load_state_dict(bytes_to_state_dict(r.content))
     model.to(device)
     progress = (rnd - 1) / task["max_rounds"] if task.get("max_rounds") else 0.0
     optimizer = spec.make_optimizer(model, progress)
     lr = optimizer.param_groups[0]["lr"]
-    part = get_slice(training_data(spec.augment), slice_id, num_slices)
     loader = DataLoader(part, batch_size=spec.batch_size, shuffle=True, num_workers=0)
 
     log.info("Round %d: training slice %d of %d (%d images, %s, %d epoch(s), lr %.4f)",

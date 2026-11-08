@@ -1,4 +1,5 @@
 import sys
+import shutil
 import time
 
 import requests
@@ -60,17 +61,12 @@ def main():
         problem("The server didn't recognise the request.", "download the volunteer package again.")
     ok(f"Token accepted; this machine will join as '{config['node_id']}'")
 
-    step("Training data (CIFAR-10, about 170 MB, downloaded once)")
-    from shared.data import get_cifar10
-    start = time.perf_counter()
-    try:
-        train = get_cifar10(train=True)
-    except Exception as e:
-        problem(f"The dataset couldn't be downloaded ({type(e).__name__}).",
-                "check your connection and run the installer again; it resumes where it stopped.")
-    ok(f"{len(train)} training images ready ({time.perf_counter() - start:.0f} s)")
-
-    print("\nAll checks passed. Start volunteering with the start script.")
+    step("Disk space for training data")
+    free_gb = shutil.disk_usage(".").free / 1e9
+    if free_gb < 1:
+        problem(f"Only {free_gb:.1f} GB of disk space is free.", "free up at least 1 GB, then run the installer again.")
+    ok(f"{free_gb:.0f} GB free. When a job starts, Lattice downloads only this computer's share of its data "
+       "(usually 20\u201370 MB) from the Lattice server, and reuses it for the rest of the job.")
 
 
 if __name__ == "__main__":
