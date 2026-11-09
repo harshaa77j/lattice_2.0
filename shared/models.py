@@ -3,6 +3,7 @@ from typing import Callable, Optional
 
 import torch
 from torch import nn
+import torch.nn.functional as F
 
 from shared.model import SmallCNN
 
@@ -40,6 +41,46 @@ class BNCNN(nn.Module):
 
     def forward(self, x):
         return self.head(self.features(x))
+    
+class BasicBlock(nn.Module):
+    """Two 3x3 convs plus a shortcut: the block learns a *change* to its input, which makes deep nets trainable."""
+
+    def __init__(self, c_in: int, c_out: int, stride: int):
+        super().__init__()
+        self.conv1 = nn.Conv2d(c_in, c_out, 3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(c_out)
+        self.conv2 = nn.Conv2d(c_out, c_out, 3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(c_out)
+        self.shortcut = nn.Sequential()
+        if stride != 1 or c_in != c_out:     # match the shape when the block shrinks or widens
+            self.shortcut = nn.Sequential(nn.Conv2d(c_in, c_out, 1, stride=stride, bias=False), nn.BatchNorm2d(c_out))
+
+    def forward(self, x):
+        out = F.relu(self.bn1(self.conv1(x)))
+        out = self.bn2(self.conv2(out))
+        return F.relu(out + self.shortcut(x))
+
+
+class ResNet20(nn.Module):
+    """ResNet-20 for 32x32 images (He et al., 2016): three stages of three blocks, 16/32/64 channels.
+
+    About 0.27M parameters (~1.1 MB) and roughly the same computation per image as BNCNN,
+    but deeper, so it reaches higher accuracy.
+    """
+
+    def __init__(self, num_classes: int = 10, blocks_per_stage: int = 3):
+        super().__init__()
+        self.stem = nn.Sequential(nn.Conv2d(3, 16, 3, padding=1, bias=False), nn.BatchNorm2d(16), nn.ReLU(inplace=True))
+        layers, c_in = [], 16
+        for c_out, stride in ((16, 1), (32, 2), (64, 2)):
+            for i in range(blocks_per_stage):
+                layers.append(BasicBlock(c_in, c_out, stride if i == 0 else 1))
+                c_in = c_out
+        self.stages = nn.Sequential(*layers)
+        self.head = nn.Sequential(nn.AdaptiveAvgPool2d(1), nn.Flatten(), nn.Linear(64, num_classes))
+
+    def forward(self, x):
+        return self.head(self.stages(self.stem(x)))
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -122,6 +163,18 @@ LIBRARY: dict[str, ModelSpec] = {
         augment=True,
         batch_size=64,
         lr=0.01,
+    ),
+    "resnet20": ModelSpec(
+        name="resnet20",
+        title="ResNet-20",
+        description="Highest accuracy. A 20-layer residual network with augmentation; "
+                    "about the same cost per round as the batch-norm CNN.",
+        build=ResNet20,
+        augment=True,
+        batch_size=128,
+        lr=0.05,
+        weight_decay=5e-4,
+        schedule="cosine",
     ),
 }
 
