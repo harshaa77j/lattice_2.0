@@ -27,6 +27,7 @@ import tempfile
 from starlette.concurrency import run_in_threadpool
 from server.datasets import MAX_ZIP_BYTES, DatasetError, DatasetStore
 from server.recommender import recommend
+from server.assistant import chat as assistant_chat
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -119,6 +120,17 @@ class RecommendRequest(BaseModel):
     max_rounds: int = Field(default=20, ge=1, le=200)
     local_epochs: int = Field(default=1, ge=1, le=10)
     budget_min: Optional[float] = Field(default=None, gt=0, le=24 * 60)
+    
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=4000)
+
+class AssistantRequest(BaseModel):
+    messages: list[ChatMessage] = Field(min_length=1, max_length=40)
+    dataset: str = Field(default="cifar10", min_length=1, max_length=80)
+    priority: Literal["fastest", "balanced", "accurate"] = "balanced"
+    max_rounds: int = Field(default=20, ge=1, le=200)
+    local_epochs: int = Field(default=1, ge=1, le=10)
 
 @app.get("/health")
 def health():
@@ -240,6 +252,20 @@ def recommend_model(body: RecommendRequest):
     devices = [n["device"] for n in coord.admin_nodes() if n["status"] in ("available", "training")]
     return recommend(meta, devices, body.priority, body.max_rounds, body.local_epochs, body.budget_min)
 
+@app.post("/assistant", dependencies=[Depends(require_researcher_key)])
+def assistant(body: AssistantRequest):
+    """One turn of the model assistant. A plain def: the Groq call runs in a worker thread."""
+    if body.dataset == "cifar10":
+        meta = {"name": "CIFAR-10", "train_count": 50_000, "num_classes": 10}
+    else:
+        try:
+            meta = datasets.meta(body.dataset)
+        except DatasetError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+    devices = [n["device"] for n in coord.admin_nodes() if n["status"] in ("available", "training")]
+    return assistant_chat([m.model_dump() for m in body.messages], meta, devices,
+                          body.priority, body.max_rounds, body.local_epochs)
+
 @app.get("/admin/status", dependencies=[Depends(require_admin_key)])
 def admin_status():
     return coord.admin_status(SETTINGS, VERSION)
@@ -283,6 +309,19 @@ async def _body_to_file(request: Request, limit: int) -> Path:
 def list_datasets():
     return datasets.list()
 
+@app.delete("/datasets/{dataset_id}", dependencies=[Depends(require_researcher_key)])
+def delete_dataset(dataset_id: str):
+    """Delete a stored dataset, unless a job that hasn't finished is using it."""
+    busy = [j for j in coord.list_jobs()
+            if j["dataset"] == dataset_id and j["status"] in ("waiting_for_nodes", "training")]
+    if busy:
+        raise HTTPException(status_code=409,
+                            detail=f"job '{busy[0]['name']}' is using this dataset; wait for it to finish first")
+    try:
+        datasets.delete(dataset_id)
+    except DatasetError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {"deleted": dataset_id}
 
 @app.post("/datasets", dependencies=[Depends(require_researcher_key)])
 async def upload_dataset(request: Request, name: str = Query(min_length=1, max_length=64),

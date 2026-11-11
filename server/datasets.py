@@ -6,6 +6,9 @@ import threading
 import time
 import uuid
 import zipfile
+import hashlib
+import shutil
+
 from collections import OrderedDict
 from pathlib import Path
 
@@ -103,9 +106,18 @@ class DatasetStore:
 
     def test_arrays(self, dataset_id: str):
         return unpack_arrays((self._dir(dataset_id) / "test.npz").read_bytes())
+    
+    def delete(self, dataset_id: str):
+        """Remove a dataset's folder and forget anything cached from it."""
+        folder = self._dir(dataset_id)              # validates the id; raises if it doesn't exist
+        with self._lock:
+            self._train.pop(dataset_id, None)
+            for key in [k for k in self._slices if k[0] == dataset_id]:
+                del self._slices[key]
+        shutil.rmtree(folder)
 
     # ------------------------------------------------------------ writing
-    def add_arrays(self, name, classes, train_images, train_labels, test_images, test_labels, source):
+    def add_arrays(self, name, classes, train_images, train_labels, test_images, test_labels, source, extra=None):
         dataset_id = _slug(name)
         d = self.root / dataset_id
         d.mkdir(parents=True)
@@ -114,7 +126,7 @@ class DatasetStore:
         (d / "test.npz").write_bytes(pack_arrays(test_images, test_labels))
         meta = {"id": dataset_id, "name": name, "classes": list(classes), "num_classes": len(classes),
                 "train_count": int(len(train_labels)), "test_count": int(len(test_labels)),
-                "image_size": IMAGE_SIZE, "source": source, "created_at": time.time()}
+                "image_size": IMAGE_SIZE, "source": source, "created_at": time.time(), **(extra or {})}
         (d / "meta.json").write_text(json.dumps(meta, indent=2))
         return meta
 
@@ -122,6 +134,10 @@ class DatasetStore:
         """A zip with one folder per class -> a stored dataset. Raises DatasetError with a reason."""
         if len(zip_bytes) > MAX_ZIP_BYTES:
             raise DatasetError(f"the zip is larger than {MAX_ZIP_BYTES // (1024 * 1024)} MB")
+        digest = hashlib.sha256(zip_bytes).hexdigest()
+        for existing in self.list():
+            if existing.get("sha256") == digest:
+                return {**existing, "already_existed": True}
         try:
             zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
         except zipfile.BadZipFile:
@@ -162,6 +178,6 @@ class DatasetStore:
             te_x.append(imgs[order[:n_test]]); te_y += [label] * n_test
             tr_x.append(imgs[order[n_test:]]); tr_y += [label] * (len(imgs) - n_test)
         meta = self.add_arrays(name, classes, np.concatenate(tr_x), np.asarray(tr_y),
-                               np.concatenate(te_x), np.asarray(te_y), source="upload")
+                        np.concatenate(te_x), np.asarray(te_y), source="upload", extra={"sha256": digest})
         meta["skipped_files"] = skipped
         return meta
