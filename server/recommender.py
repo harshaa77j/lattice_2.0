@@ -31,7 +31,7 @@ def _estimate(model: str, train_count: int, devices: list, rounds: int, local_ep
                 "cifar_best": MODEL_FACTS[model]["cifar_best"]}
 
 def recommend(dataset_meta: dict, devices: list, priority: str = "balanced",
-              rounds: int = 20, local_epochs: int = 1, budget_min=None) -> dict:
+              rounds: int = 20, local_epochs: int = 1, budget_min=None, explain_it: bool = True) -> dict:
     ranking = [_estimate(m, dataset_meta["train_count"], devices, rounds, local_epochs) for m in MODEL_FACTS]
     per_class = dataset_meta["train_count"] / max(dataset_meta["num_classes"], 1)
     small = per_class < SMALL_PER_CLASS
@@ -65,7 +65,7 @@ def recommend(dataset_meta: dict, devices: list, priority: str = "balanced",
         reasons.append(f"it fits your time budget of {budget_min} minutes" if choice["est_total_min"] <= budget_min
                        else f"no model fits {budget_min} minutes; this is the quickest option")
     return {"model": choice["model"], "ranking": ranking, "reasons": reasons, "small_dataset": small,
-            "explanation": explain(choice, ranking, reasons)}
+                       "explanation": explain(choice, ranking, reasons) if explain_it else None}
 
 def explain(choice: dict, ranking: list, reasons: list) -> str:
     fallback = (f"Recommended: {choice['model']} (about {choice['est_round_s']} s per round, "

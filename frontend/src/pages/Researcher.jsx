@@ -188,7 +188,7 @@ export function NewJob() {
       setDatasets(list);
       setForm((f) => {
         if (select) return { ...f, dataset: select };
-        if (f.dataset || !list.length) return f;
+        if ((f.dataset && list.some((d) => d.id === f.dataset)) || !list.length) return f;
         return { ...f, dataset: (list.find((d) => d.name === "CIFAR-10") || list[0]).id };
       });
     }).catch(() => setDatasets([]));
@@ -201,10 +201,25 @@ export function NewJob() {
         (fraction) => setUpload((u) => ({ ...u, progress: fraction })));
       await loadDatasets(meta.id);
       setUpload({ open: false, file: null, name: "", consent: false, busy: false, progress: null, error: null,
-        done: `Uploaded "${meta.name}": ${meta.train_count} training and ${meta.test_count} test images in ${meta.num_classes} classes`
-          + (meta.skipped_files ? ` (${meta.skipped_files} files skipped)` : "") + "." });
+        done: meta.already_existed
+          ? `This file was already uploaded as "${meta.name}", so that dataset is now selected. No copy was made.`
+          : `Uploaded "${meta.name}": ${meta.train_count} training and ${meta.test_count} test images in ${meta.num_classes} classes`
+            + (meta.skipped_files ? ` (${meta.skipped_files} files skipped)` : "") + "." });
     } catch (e) {
       setUpload((u) => ({ ...u, busy: false, progress: null, error: e.message }));
+    }
+  };
+
+  const [dsError, setDsError] = useState(null);
+  const removeDataset = async (d) => {
+    if (!window.confirm(`Delete "${d.name}" (${(d.train_count + d.test_count).toLocaleString()} images)? This can't be undone.`)) return;
+    setDsError(null);
+    try {
+      await api.deleteDataset(d.id);
+      setUpload((u) => ({ ...u, done: `Deleted "${d.name}".` }));
+      await loadDatasets();
+    } catch (e) {
+      setDsError(e.message);
     }
   };
 
@@ -264,11 +279,17 @@ export function NewJob() {
                       <button type="button" className="chip on" aria-pressed="true">CIFAR-10 (built-in)</button>
                     )}
                     {datasets?.map((d) => (
-                      <button key={d.id} type="button" className={`chip${form.dataset === d.id ? " on" : ""}`}
-                        aria-pressed={form.dataset === d.id}
-                        onClick={() => setForm((f) => ({ ...f, dataset: d.id }))}>
-                        {d.name} · {(d.train_count + d.test_count).toLocaleString()} images · {d.num_classes} classes
-                      </button>
+                      <span key={d.id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+                        <button type="button" className={`chip${form.dataset === d.id ? " on" : ""}`}
+                          aria-pressed={form.dataset === d.id}
+                          onClick={() => setForm((f) => ({ ...f, dataset: d.id }))}>
+                          {d.name} · {(d.train_count + d.test_count).toLocaleString()} images · {d.num_classes} classes
+                        </button>
+                        {d.source === "upload" && (
+                          <button type="button" className="chip" title={`Delete ${d.name}`} aria-label={`Delete ${d.name}`}
+                            style={{ padding: "0 12px" }} onClick={() => removeDataset(d)}>{"\u00D7"}</button>
+                        )}
+                      </span>
                     ))}
                     <button type="button" className={`chip${upload.open ? " on" : ""}`}
                       onClick={() => setUpload((u) => ({ ...u, open: !u.open, error: null }))}>
@@ -276,6 +297,7 @@ export function NewJob() {
                     </button>
                   </div>
                   {upload.done && <span className="muted small">{upload.done}</span>}
+                  {dsError && <p className="error" role="alert">{dsError}</p>}
                   {upload.open && (
                     <div className="note" style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
                       <span className="small">
