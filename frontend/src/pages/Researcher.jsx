@@ -69,6 +69,21 @@ export function NewJob() {
       setUpload((u) => ({ ...u, busy: false, error: e.message }));
     }
   };
+  const [rec, setRec] = useState({ priority: "balanced", busy: false, data: null, error: null });
+  const titleOf = (name) => models?.find((m) => m.name === name)?.title || name;
+  const getRecommendation = async () => {
+    setRec((r) => ({ ...r, busy: true, error: null, data: null }));
+    try {
+      const data = await api.recommend({
+        dataset: form.dataset || "cifar10", priority: rec.priority,
+        max_rounds: Number(form.maxRounds) || 20, local_epochs: Number(form.epochs) || 1,
+      });
+      setRec((r) => ({ ...r, busy: false, data }));
+    } catch (e) {
+      setRec((r) => ({ ...r, busy: false, error: e.message }));
+    }
+  };
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const set = (k) => (e) => setForm((f) => ({ ...f, [k]: e.target.value }));
@@ -180,6 +195,46 @@ export function NewJob() {
                   </div>
                   {models?.find((m) => m.name === form.model) && (
                     <span className="muted small">{models.find((m) => m.name === form.model).description}</span>
+                  )}
+                </div>
+                <div className="note" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  <strong>Not sure which model?</strong>
+                  <div className="chips">
+                    {[["fastest", "Fastest"], ["balanced", "Balanced"], ["accurate", "Most accurate"]].map(([key, label]) => (
+                      <button key={key} type="button" className={`chip${rec.priority === key ? " on" : ""}`}
+                        aria-pressed={rec.priority === key}
+                        onClick={() => setRec((r) => ({ ...r, priority: key, data: null }))}>{label}</button>
+                    ))}
+                  </div>
+                  <div>
+                    <button type="button" className="btn secondary" disabled={rec.busy} onClick={getRecommendation}>
+                      {rec.busy ? "Thinking\u2026" : "Recommend a model"}
+                    </button>
+                  </div>
+                  {rec.error && <p className="error" role="alert">{rec.error}</p>}
+                  {rec.data && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      <span>Recommended: <strong>{titleOf(rec.data.model)}</strong></span>
+                      <span className="small">{rec.data.explanation}</span>
+                      <table className="small" style={{ borderCollapse: "collapse" }}>
+                        <tbody>
+                          {rec.data.ranking.map((r) => (
+                            <tr key={r.model} style={{ fontWeight: r.model === rec.data.model ? 600 : 400 }}>
+                              <td style={{ paddingRight: 16 }}>{titleOf(r.model)}</td>
+                              <td style={{ paddingRight: 16 }}>~{r.est_round_s} s per round</td>
+                              <td>~{r.est_total_min} min in total</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                      <span className="muted small">Estimates use the volunteers online right now and measured model speeds.</span>
+                      <div>
+                        <button type="button" className="btn" disabled={form.model === rec.data.model}
+                          onClick={() => setForm((f) => ({ ...f, model: rec.data.model }))}>
+                          {form.model === rec.data.model ? "Selected \u2713" : `Use ${titleOf(rec.data.model)}`}
+                        </button>
+                      </div>
+                    </div>
                   )}
                 </div>
               </div>

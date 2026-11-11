@@ -26,6 +26,7 @@ from server.downloads import PLATFORMS, REPO, build_volunteer_zip
 import tempfile
 from starlette.concurrency import run_in_threadpool
 from server.datasets import MAX_ZIP_BYTES, DatasetError, DatasetStore
+from server.recommender import recommend
 
 load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
@@ -112,6 +113,12 @@ class JobCreate(BaseModel):
     max_rounds: int = Field(ge=1, le=200)
     local_epochs: int = Field(ge=1, le=10)
 
+class RecommendRequest(BaseModel):
+    dataset: str = Field(default="cifar10", min_length=1, max_length=80)
+    priority: Literal["fastest", "balanced", "accurate"] = "balanced"
+    max_rounds: int = Field(default=20, ge=1, le=200)
+    local_epochs: int = Field(default=1, ge=1, le=10)
+    budget_min: Optional[float] = Field(default=None, gt=0, le=24 * 60)
 
 @app.get("/health")
 def health():
@@ -219,6 +226,19 @@ def job_model(job_id: str):
     return Response(content=data, media_type="application/octet-stream",
                     headers={"Content-Disposition": f'attachment; filename="{filename}"'})
 
+@app.post("/recommend", dependencies=[Depends(require_researcher_key)])
+def recommend_model(body: RecommendRequest):
+    """Suggests a library model for this dataset and the volunteers online right now.
+    A plain def, so FastAPI runs it in a worker thread: the optional Groq call never blocks the server."""
+    if body.dataset == "cifar10":
+        meta = {"train_count": 50_000, "num_classes": 10}
+    else:
+        try:
+            meta = datasets.meta(body.dataset)
+        except DatasetError as e:
+            raise HTTPException(status_code=404, detail=str(e))
+    devices = [n["device"] for n in coord.admin_nodes() if n["status"] in ("available", "training")]
+    return recommend(meta, devices, body.priority, body.max_rounds, body.local_epochs, body.budget_min)
 
 @app.get("/admin/status", dependencies=[Depends(require_admin_key)])
 def admin_status():
