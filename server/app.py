@@ -326,18 +326,19 @@ def delete_dataset(dataset_id: str):
 @app.post("/datasets", dependencies=[Depends(require_researcher_key)])
 async def upload_dataset(request: Request, name: str = Query(min_length=1, max_length=64),
                          consent: bool = Query(default=False)):
-    """A researcher's zip of class folders, sent as the raw request body."""
+    """A researcher's zip of class folders, sent as the raw request body. The zip is saved,
+    then built in the background; the reply is an upload status to poll, not the dataset itself."""
     if not consent:
         raise HTTPException(status_code=422, detail="please confirm that volunteers will process these images")
     path = await _body_to_file(request, MAX_ZIP_BYTES)
-    try:
-        meta = await run_in_threadpool(datasets.build_from_zip, name, path.read_bytes())
-    except DatasetError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    finally:
-        path.unlink(missing_ok=True)
-    return meta
+    return datasets.start_build(name, path)
 
+@app.get("/datasets/uploads/{upload_id}", dependencies=[Depends(require_researcher_key)])
+def upload_status(upload_id: str):
+    status = datasets.upload_status(upload_id)
+    if status is None:
+        raise HTTPException(status_code=404, detail="no such upload (statuses are kept for an hour after finishing)")
+    return status
 
 @app.post("/admin/datasets/import", dependencies=[Depends(require_admin_key)])
 async def import_dataset(request: Request, name: str = Query(min_length=1, max_length=64),

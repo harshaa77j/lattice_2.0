@@ -79,6 +79,7 @@ export const api = {
   uploadDataset: (name, file, onProgress) =>
     uploadWithProgress(`/datasets?name=${encodeURIComponent(name)}&consent=true`, file, onProgress),
   deleteDataset: (id) => request(`/datasets/${encodeURIComponent(id)}`, { kind: "researcher", method: "DELETE" }),
+  uploadStatus: (id) => request(`/datasets/uploads/${encodeURIComponent(id)}`, { kind: "researcher" }),
   recommend: (req) => request("/recommend", { kind: "researcher", method: "POST", body: req }),
   assistant: (req) => request("/assistant", { kind: "researcher", method: "POST", body: req }),
   listJobs: () => request("/jobs", { kind: "researcher" }),

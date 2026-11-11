@@ -182,7 +182,7 @@ export function NewJob() {
 
   const [datasets, setDatasets] = useState(null);
   const [upload, setUpload] = useState({ open: false, file: null, name: "", consent: false, busy: false,
-    progress: null, error: null, done: null });
+    progress: null, phase: null, processed: 0, total: null, error: null, done: null });
   const loadDatasets = (select) =>
     api.listDatasets().then((list) => {
       setDatasets(list);
@@ -195,18 +195,34 @@ export function NewJob() {
   useEffect(() => { loadDatasets(); }, []);
 
   const doUpload = async () => {
-    setUpload((u) => ({ ...u, busy: true, progress: 0, error: null, done: null }));
+    setUpload((u) => ({ ...u, busy: true, progress: 0, phase: "uploading", processed: 0, total: null,
+      error: null, done: null }));
     try {
-      const meta = await api.uploadDataset(upload.name.trim(), upload.file,
+      let status = await api.uploadDataset(upload.name.trim(), upload.file,
         (fraction) => setUpload((u) => ({ ...u, progress: fraction })));
+      setUpload((u) => ({ ...u, phase: "preparing" }));
+      let failures = 0;
+      while (status.state === "queued" || status.state === "processing") {
+        await new Promise((r) => setTimeout(r, 1500));
+        try {
+          status = await api.uploadStatus(status.upload_id);
+          failures = 0;
+          setUpload((u) => ({ ...u, processed: status.processed || 0, total: status.total }));
+        } catch (e) {
+          if (++failures >= 5) throw e;          // brief network blips are tolerated
+        }
+      }
+      if (status.state === "error") throw new Error(status.error || "The upload couldn't be processed.");
+      const meta = status.meta;
       await loadDatasets(meta.id);
-      setUpload({ open: false, file: null, name: "", consent: false, busy: false, progress: null, error: null,
+      setUpload({ open: false, file: null, name: "", consent: false, busy: false, progress: null, phase: null,
+        processed: 0, total: null, error: null,
         done: meta.already_existed
           ? `This file was already uploaded as "${meta.name}", so that dataset is now selected. No copy was made.`
           : `Uploaded "${meta.name}": ${meta.train_count} training and ${meta.test_count} test images in ${meta.num_classes} classes`
             + (meta.skipped_files ? ` (${meta.skipped_files} files skipped)` : "") + "." });
     } catch (e) {
-      setUpload((u) => ({ ...u, busy: false, progress: null, error: e.message }));
+      setUpload((u) => ({ ...u, busy: false, progress: null, phase: null, error: e.message }));
     }
   };
 
@@ -233,9 +249,12 @@ export function NewJob() {
   if (!(form.maxRounds >= 1 && form.maxRounds <= 200)) problems.push("Max rounds must be between 1 and 200.");
   if (!(form.epochs >= 1 && form.epochs <= 10)) problems.push("Epochs per round must be between 1 and 10.");
 
-  const uploadLabel = upload.progress == null ? null
-    : upload.progress < 1 ? `Uploading\u2026 ${Math.round(upload.progress * 100)}%`
-    : "Preparing your images\u2026 this can take a minute for large datasets.";
+  const preparing = upload.phase === "preparing";
+  const barFraction = preparing ? (upload.total ? upload.processed / upload.total : 0) : (upload.progress || 0);
+  const uploadLabel = !upload.phase ? null
+    : !preparing ? `Uploading\u2026 ${Math.round((upload.progress || 0) * 100)}%`
+    : upload.total ? `Preparing images\u2026 ${upload.processed.toLocaleString()} of ${upload.total.toLocaleString()}`
+    : "Waiting for the server to start preparing\u2026";
 
   return (
     <Shell area="research">
@@ -321,7 +340,7 @@ export function NewJob() {
                       {uploadLabel && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 6 }} role="status" aria-live="polite">
                           <div className="track" style={{ background: "var(--row)" }}>
-                            <div style={{ width: `${Math.round((upload.progress || 0) * 100)}%`, transition: "width 0.2s" }} />
+                             <div style={{ width: `${Math.round(barFraction * 100)}%`, transition: "width 0.2s" }} />
                           </div>
                           <span className="muted small">{uploadLabel}</span>
                         </div>

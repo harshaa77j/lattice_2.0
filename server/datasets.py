@@ -1,15 +1,29 @@
+"""The server's dataset store (on the persistent volume at LATTICE_DATASET_DIR).
+
+Each dataset lives in <root>/<dataset_id>/:
+  meta.json                   name, classes, counts, created_at, sha256 of the uploaded zip
+  train_images.npy, train_labels.npy
+                              uncompressed, so they can be memory-mapped: a slice reads
+                              only its own rows instead of loading the whole set into RAM
+  test.npz                    the held-out split, for server-side evaluation
+
+Uploads are processed in the background (start_build): the HTTP request returns at once,
+and the website polls upload_status() for progress. Builds run one at a time, reading the
+zip from disk, so a large upload can't exhaust the server's memory or time out a proxy.
+"""
+import hashlib
 import io
 import json
+import logging
 import os
 import re
+import shutil
 import threading
 import time
 import uuid
 import zipfile
-import hashlib
-import shutil
-
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -19,6 +33,8 @@ from shared.data import slice_data
 from shared.datasets import IMAGE_SIZE, pack_arrays, unpack_arrays
 from shared.protocol import DATA_SEED
 
+log = logging.getLogger("lattice.datasets")
+
 MAX_ZIP_BYTES = 200 * 1024 * 1024            # size of the uploaded file
 MAX_UNCOMPRESSED_BYTES = 1024 * 1024 * 1024  # guards against zip bombs
 MAX_FILES = 60_000
@@ -26,6 +42,7 @@ MIN_PER_CLASS = 5
 TEST_FRACTION = 0.10
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".gif", ".webp"}
 ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
+UPLOAD_STATUS_TTL = 3600                     # forget finished upload statuses after an hour
 Image.MAX_IMAGE_PIXELS = 40_000_000          # refuse absurdly large images
 
 
@@ -49,6 +66,17 @@ def _slug(name: str) -> str:
     return f"{s}-{uuid.uuid4().hex[:6]}"
 
 
+def _sha256(source) -> str:
+    h = hashlib.sha256()
+    if isinstance(source, (str, Path)):
+        with open(source, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+    else:
+        h.update(source)
+    return h.hexdigest()
+
+
 class DatasetStore:
     def __init__(self, root: str):
         self.root = Path(root)
@@ -57,6 +85,8 @@ class DatasetStore:
         self._train = {}                        # dataset_id -> (images memmap, labels)
         self._slices = OrderedDict()            # (id, slice_id, num_slices) -> packed bytes
         self._max_cached_slices = 12
+        self._uploads = {}                      # upload_id -> status dict
+        self._builder = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dataset-build")
 
     # ------------------------------------------------------------ reading
     def _dir(self, dataset_id: str) -> Path:
@@ -106,7 +136,7 @@ class DatasetStore:
 
     def test_arrays(self, dataset_id: str):
         return unpack_arrays((self._dir(dataset_id) / "test.npz").read_bytes())
-    
+
     def delete(self, dataset_id: str):
         """Remove a dataset's folder and forget anything cached from it."""
         folder = self._dir(dataset_id)              # validates the id; raises if it doesn't exist
@@ -130,39 +160,46 @@ class DatasetStore:
         (d / "meta.json").write_text(json.dumps(meta, indent=2))
         return meta
 
-    def build_from_zip(self, name: str, zip_bytes: bytes) -> dict:
-        """A zip with one folder per class -> a stored dataset. Raises DatasetError with a reason."""
-        if len(zip_bytes) > MAX_ZIP_BYTES:
+    def build_from_zip(self, name: str, source, progress=None) -> dict:
+        """A zip of class folders (a file path, or bytes) -> a stored dataset.
+        progress(done, total) is called as images are prepared. Raises DatasetError with a reason."""
+        size = os.path.getsize(source) if isinstance(source, (str, Path)) else len(source)
+        if size > MAX_ZIP_BYTES:
             raise DatasetError(f"the zip is larger than {MAX_ZIP_BYTES // (1024 * 1024)} MB")
-        digest = hashlib.sha256(zip_bytes).hexdigest()
+
+        # The same file again (e.g. a retry after a timeout) returns the dataset it already became.
+        digest = _sha256(source)
         for existing in self.list():
             if existing.get("sha256") == digest:
                 return {**existing, "already_existed": True}
+
         try:
-            zf = zipfile.ZipFile(io.BytesIO(zip_bytes))
+            zf = zipfile.ZipFile(source if isinstance(source, (str, Path)) else io.BytesIO(source))
         except zipfile.BadZipFile:
             raise DatasetError("that file isn't a valid zip")
-        entries = [i for i in zf.infolist() if not i.is_dir()
-                   and Path(i.filename).suffix.lower() in IMAGE_EXTENSIONS
-                   and not any(part.startswith((".", "__MACOSX")) for part in Path(i.filename).parts)]
-        if len(entries) > MAX_FILES:
-            raise DatasetError(f"too many images (the limit is {MAX_FILES:,})")
-        if sum(i.file_size for i in entries) > MAX_UNCOMPRESSED_BYTES:
-            raise DatasetError("the images are too large in total once unzipped")
+        with zf:
+            entries = [i for i in zf.infolist() if not i.is_dir()
+                       and Path(i.filename).suffix.lower() in IMAGE_EXTENSIONS
+                       and not any(part.startswith((".", "__MACOSX")) for part in Path(i.filename).parts)]
+            if len(entries) > MAX_FILES:
+                raise DatasetError(f"too many images (the limit is {MAX_FILES:,})")
+            if sum(i.file_size for i in entries) > MAX_UNCOMPRESSED_BYTES:
+                raise DatasetError("the images are too large in total once unzipped")
 
-        # The class is the folder directly containing the image; a single shared top folder is ignored.
-        by_class, skipped = {}, 0
-        for info in entries:
-            parts = Path(info.filename).parts
-            if len(parts) < 2:
-                skipped += 1                       # an image not inside any class folder
-                continue
-            try:
-                pixels = _to_square_pixels(zf.read(info))
-            except Exception:
-                skipped += 1                       # unreadable or not really an image
-                continue
-            by_class.setdefault(parts[-2], []).append(pixels)
+            # The class is the folder directly containing the image; a single shared top folder is ignored.
+            by_class, skipped = {}, 0
+            for n, info in enumerate(entries, 1):
+                parts = Path(info.filename).parts
+                if len(parts) < 2:
+                    skipped += 1                       # an image not inside any class folder
+                else:
+                    try:
+                        by_class.setdefault(parts[-2], []).append(_to_square_pixels(zf.read(info)))
+                    except Exception:
+                        skipped += 1                   # unreadable or not really an image
+                if progress and (n % 50 == 0 or n == len(entries)):
+                    progress(n, len(entries))
+
         classes = sorted(c for c, imgs in by_class.items() if len(imgs) >= MIN_PER_CLASS)
         if len(classes) < 2:
             raise DatasetError(f"need at least 2 class folders with {MIN_PER_CLASS}+ images each "
@@ -178,6 +215,48 @@ class DatasetStore:
             te_x.append(imgs[order[:n_test]]); te_y += [label] * n_test
             tr_x.append(imgs[order[n_test:]]); tr_y += [label] * (len(imgs) - n_test)
         meta = self.add_arrays(name, classes, np.concatenate(tr_x), np.asarray(tr_y),
-                        np.concatenate(te_x), np.asarray(te_y), source="upload", extra={"sha256": digest})
+                               np.concatenate(te_x), np.asarray(te_y), source="upload", extra={"sha256": digest})
         meta["skipped_files"] = skipped
         return meta
+
+    # ------------------------------------------------------------ background uploads
+    def start_build(self, name: str, path: Path) -> dict:
+        """Queue a zip (already saved at path) for building; returns its status at once.
+        The file is deleted when the build finishes, whatever the outcome."""
+        upload_id = uuid.uuid4().hex[:12]
+        status = {"upload_id": upload_id, "name": name, "state": "queued", "processed": 0, "total": None,
+                  "meta": None, "error": None, "updated_at": time.time()}
+        with self._lock:
+            self._forget_old_uploads()
+            self._uploads[upload_id] = status
+        self._builder.submit(self._run_build, upload_id, name, Path(path))
+        return dict(status)
+
+    def upload_status(self, upload_id: str):
+        with self._lock:
+            status = self._uploads.get(upload_id)
+            return dict(status) if status else None
+
+    def _update(self, upload_id: str, **changes):
+        with self._lock:
+            self._uploads[upload_id].update(changes, updated_at=time.time())
+
+    def _run_build(self, upload_id: str, name: str, path: Path):
+        self._update(upload_id, state="processing")
+        try:
+            meta = self.build_from_zip(name, path, progress=lambda done, total:
+                                       self._update(upload_id, processed=done, total=total))
+            self._update(upload_id, state="done", meta=meta)
+        except DatasetError as e:
+            self._update(upload_id, state="error", error=str(e))
+        except Exception:
+            log.exception("building dataset '%s' failed", name)
+            self._update(upload_id, state="error", error="the upload couldn't be processed")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def _forget_old_uploads(self):
+        now = time.time()
+        for uid in [u for u, s in self._uploads.items()
+                    if s["state"] in ("done", "error") and now - s["updated_at"] > UPLOAD_STATUS_TTL]:
+            del self._uploads[uid]
