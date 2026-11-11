@@ -42,7 +42,7 @@ async function request(path, { kind, method = "GET", body, file, raw = false } =
   if (!res.ok) {
     let detail = "";
     try { detail = (await res.json()).detail; } catch { /* not JSON */ }
-        const fallback = res.status === 502 || res.status === 503
+    const fallback = res.status === 502 || res.status === 503
       ? "The server is restarting or unavailable. Try again in a minute."
       : res.statusText || `The server returned an error (${res.status}).`;
     throw new ApiError(res.status, typeof detail === "string" && detail ? detail : fallback);
@@ -50,11 +50,36 @@ async function request(path, { kind, method = "GET", body, file, raw = false } =
   return raw ? res : res.json();
 }
 
+// Uploads with progress. fetch can't report upload progress; XMLHttpRequest can.
+// onProgress receives a fraction from 0 to 1; 1 means "all sent, the server is preparing".
+function uploadWithProgress(path, file, onProgress) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", path);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.setRequestHeader(RESEARCHER_KEY_HEADER, getKey("researcher"));
+    xhr.upload.onprogress = (e) => { if (e.lengthComputable && onProgress) onProgress(e.loaded / e.total); };
+    xhr.upload.onload = () => { if (onProgress) onProgress(1); };
+    xhr.onload = () => {
+      let data = null;
+      try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(data);
+      else reject(new ApiError(xhr.status, (data && typeof data.detail === "string" && data.detail)
+        || `The upload failed (${xhr.status}).`));
+    };
+    xhr.onerror = () => reject(new ApiError(0, "The upload failed: check your connection and try again."));
+    xhr.send(file);
+  });
+}
+
 // D8 contract (DESIGN.md)
 export const api = {
   listModels: () => request("/models"),
   listDatasets: () => request("/datasets", { kind: "researcher" }),
-  uploadDataset: (name, file) => request(`/datasets?name=${encodeURIComponent(name)}&consent=true`, { kind: "researcher", method: "POST", file }),
+  uploadDataset: (name, file, onProgress) =>
+    uploadWithProgress(`/datasets?name=${encodeURIComponent(name)}&consent=true`, file, onProgress),
+  recommend: (req) => request("/recommend", { kind: "researcher", method: "POST", body: req }),
+  assistant: (req) => request("/assistant", { kind: "researcher", method: "POST", body: req }),
   listJobs: () => request("/jobs", { kind: "researcher" }),
   getJob: (id) => request(`/jobs/${encodeURIComponent(id)}`, { kind: "researcher" }),
   createJob: (job) => request("/jobs", { kind: "researcher", method: "POST", body: job }),
@@ -122,6 +147,7 @@ export const SAMPLE_JOB = {
   job_id: "preview",
   name: "cifar10-run-1",
   dataset: "cifar10",
+  dataset_name: "CIFAR-10",
   model: "cnn_small",
   status: "training",
   current_round: 12,
@@ -136,8 +162,8 @@ export const SAMPLE_JOB = {
 
 export const SAMPLE_JOBS = [
   { ...SAMPLE_JOB },
-  { job_id: "p2", name: "cifar10-baseline", dataset: "cifar10", model: "cnn_small", status: "done", current_round: 19, max_rounds: 30, best_accuracy: 0.61 },
-  { job_id: "p3", name: "cifar10-short", dataset: "cifar10", model: "cnn_small", status: "stopped", current_round: 10, max_rounds: 10, best_accuracy: 0.52 },
+  { job_id: "p2", name: "cifar10-baseline", dataset: "cifar10", dataset_name: "CIFAR-10", model: "cnn_small", status: "done", current_round: 19, max_rounds: 30, best_accuracy: 0.61 },
+  { job_id: "p3", name: "cifar10-short", dataset: "cifar10", dataset_name: "CIFAR-10", model: "cnn_small", status: "stopped", current_round: 10, max_rounds: 10, best_accuracy: 0.52 },
 ];
 
 export const SAMPLE_ADMIN = {
