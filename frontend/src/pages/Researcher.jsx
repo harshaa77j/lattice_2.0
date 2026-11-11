@@ -12,6 +12,16 @@ const STATUS = {
   stopped: "Stopped",
 };
 
+async function withRetry(fn, attempts = 3, delayMs = 1500) {
+  for (let i = 1; ; i++) {
+    try { return await fn(); }
+    catch (e) {
+      if (i >= attempts || (e instanceof ApiError && e.badKey)) throw e;
+      await new Promise((r) => setTimeout(r, delayMs * i));
+    }
+  }
+}
+
 function ResearcherGate({ children }) {
   const [gen, setGen] = useState(0);
   return (
@@ -176,22 +186,26 @@ export function NewJob() {
   const navigate = useNavigate();
   const [form, setForm] = useState({ name: "cifar10-run-1", model: "cnn_bn", target: 80, maxRounds: 40, epochs: 1 });
   const [models, setModels] = useState(null);
-  useEffect(() => {
-    api.listModels().then(setModels).catch(() => setModels([]));
-  }, []);
+  const loadModels = () => {
+    setModels(null);
+    withRetry(api.listModels).then(setModels).catch(() => setModels([]));
+  };
+  useEffect(() => { loadModels(); }, []);
 
   const [datasets, setDatasets] = useState(null);
   const [upload, setUpload] = useState({ open: false, file: null, name: "", consent: false, busy: false,
     progress: null, phase: null, processed: 0, total: null, error: null, done: null });
+  const [datasetsFailed, setDatasetsFailed] = useState(false);
   const loadDatasets = (select) =>
-    api.listDatasets().then((list) => {
+    withRetry(api.listDatasets).then((list) => {
+      setDatasetsFailed(false);
       setDatasets(list);
       setForm((f) => {
         if (select) return { ...f, dataset: select };
         if ((f.dataset && list.some((d) => d.id === f.dataset)) || !list.length) return f;
         return { ...f, dataset: (list.find((d) => d.name === "CIFAR-10") || list[0]).id };
       });
-    }).catch(() => setDatasets([]));
+    }).catch(() => { setDatasets([]); setDatasetsFailed(true); });
   useEffect(() => { loadDatasets(); }, []);
 
   const doUpload = async () => {
@@ -317,6 +331,12 @@ export function NewJob() {
                   </div>
                   {upload.done && <span className="muted small">{upload.done}</span>}
                   {dsError && <p className="error" role="alert">{dsError}</p>}
+                  {datasetsFailed && (
+                    <span className="muted small">
+                      Couldn't load your datasets, so only the built-in CIFAR-10 is shown.{" "}
+                      <button type="button" className="btn small secondary" onClick={() => loadDatasets()}>Try again</button>
+                    </span>
+                  )}
                   {upload.open && (
                     <div className="note" style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
                       <span className="small">
@@ -361,7 +381,12 @@ export function NewJob() {
                   <span>Model</span>
                   <div className="chips">
                     {models === null && <span className="muted small">Loading the model library…</span>}
-                    {models?.length === 0 && <span className="muted small">Couldn't load the model library.</span>}
+                    {models?.length === 0 && (
+                      <span className="muted small">
+                        Couldn't load the model library.{" "}
+                        <button type="button" className="btn small secondary" onClick={loadModels}>Try again</button>
+                      </span>
+                    )}
                     {models?.map((m) => (
                       <button key={m.name} type="button" disabled={!m.ready}
                         className={`chip${form.model === m.name ? " on" : ""}`}
