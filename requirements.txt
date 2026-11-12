@@ -8,3 +8,6 @@ torch==2.14.1
 torchvision==0.29.1
 
 pytest
+
+gymnasium==1.4.0
+stable_baselines3==2.9.2
