@@ -278,6 +278,11 @@ def admin_nodes():
 def admin_events():
     return coord.admin_events()
 
+@app.get("/admin/decisions", dependencies=[Depends(require_admin_key)])
+def admin_decisions(limit: int = Query(default=10, ge=1, le=20)):
+    """The scheduler's recent choices: candidates, order, slices and reasons, newest first."""
+    return coord.admin_decisions(limit)
+
 def _public_url(request: Request) -> str:
     if PUBLIC_URL:
         return PUBLIC_URL
