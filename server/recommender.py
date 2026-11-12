@@ -11,7 +11,7 @@ log = logging.getLogger("lattice.recommender")
 MODEL_FACTS = {
     "cnn_small": {"cpu_images_per_s": 1085, "cifar_best": 76.1},
     "cnn_bn":    {"cpu_images_per_s": 284,  "cifar_best": 87.9},
-    "resnet20":  {"cpu_images_per_s": 200,  "cifar_best": 88.5},
+    "resnet20":  {"cpu_images_per_s": 195,  "cifar_best": 88.5},
 }
 NEAR_TIE_POINTS = 1.0      # accuracy differences below this (one run each) are treated as a tie
 GPU_SPEEDUP = 3.0          # Apple-GPU / CUDA volunteers vs. CPU, measured roughly on the Mac
