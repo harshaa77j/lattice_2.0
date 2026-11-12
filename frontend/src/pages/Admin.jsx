@@ -60,7 +60,10 @@ export function AdminLogin() {
 
 async function fetchAdmin() {
   const [status, nodes, events] = await Promise.all([api.adminStatus(), api.adminNodes(), api.adminEvents()]);
-  return { status, nodes, events };
+  // Decisions are optional: an older server without the route still shows the rest of the dashboard.
+  let decisions = [];
+  try { decisions = await api.adminDecisions(); } catch { decisions = []; }
+  return { status, nodes, events, decisions };
 }
 
 const NODE_STATUS = {
@@ -69,6 +72,38 @@ const NODE_STATUS = {
   standby: { cls: "outline", label: "Standby", row: "" },
   dropped: { cls: "warn", label: "Dropped", row: "" },
 };
+
+/* One round's choice: every candidate, chosen ones first in order, with the reason for each. */
+function Decision({ d, latest }) {
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, padding: "14px 16px", borderRadius: 20,
+                  background: latest ? "var(--row)" : "transparent", border: latest ? "none" : "1px solid #E3E3DE" }}>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+        <strong style={{ fontSize: 15 }}>Round {d.round}</strong>
+        <span className="muted small">{d.job} · {d.time}</span>
+        <span className={`pill ${d.scheduler === "rl" ? "lilac" : "outline"}`} style={{ marginLeft: "auto" }}>
+          {d.scheduler === "rl" ? "RL policy" : "Heuristic"}
+        </span>
+      </div>
+      {d.candidates.map((c) => (
+        <div key={c.node_id} style={{ display: "flex", gap: 10, alignItems: "center", opacity: c.chosen ? 1 : 0.55 }}>
+          <span className={`pill ${c.chosen ? "dark" : "dashed"}`} style={{ minWidth: 34, justifyContent: "center" }}
+                title={c.chosen ? `Chosen #${c.order}` : "Not chosen this round"}>
+            {c.chosen ? `#${c.order}` : "–"}
+          </span>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <p style={{ fontSize: 14, fontWeight: 600 }}>
+              {c.node_id} <span className="muted small" style={{ fontWeight: 400 }}>· {c.device}</span>
+            </p>
+            <p className="muted small" style={{ whiteSpace: "normal" }}>{c.reason}</p>
+          </div>
+          {c.score != null && <span className="pill light" title="Score from the RL policy">score {c.score.toFixed(2)}</span>}
+          <span className="pill light">{c.chosen ? `slice ${c.slice + 1}` : "skipped"}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 export function AdminDashboard() {
   const navigate = useNavigate();
@@ -83,6 +118,7 @@ export function AdminDashboard() {
   const c = s.counts || {};
   const st = s.settings || {};
   const job = s.current_job;
+  const decisions = data?.decisions || [];
 
   return (
     <Shell area="admin" onSignOut={signOut}>
@@ -141,12 +177,23 @@ export function AdminDashboard() {
               </div>
               <div className="card" style={{ gap: 10, borderRadius: 26 }}>
                 <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 4 }}>Settings in effect</h2>
-                {[["Heartbeat timeout", `${st.heartbeat_timeout ?? "–"} s`], ["Round deadline", `${st.round_deadline ?? "–"} s`], ["Min nodes per round", st.min_nodes ?? "–"]].map(([k, v]) => (
+                {[["Heartbeat timeout", `${st.heartbeat_timeout ?? "–"} s`], ["Round deadline", `${st.round_deadline ?? "–"} s`], ["Min nodes per round", st.min_nodes ?? "–"], ["Scheduler", st.scheduler ?? "–"]].map(([k, v]) => (
                   <div key={k} style={{ display: "flex", justifyContent: "space-between", fontSize: 14 }}><span className="muted">{k}</span><span style={{ fontWeight: 500 }}>{v}</span></div>
                 ))}
               </div>
             </section>
           </div>
+
+          <section className="card" style={{ borderRadius: 26, gap: 12 }}>
+            <div className="page-head" style={{ alignItems: "center" }}>
+              <h2 className="section-title">Scheduler decisions</h2>
+              <span className="muted" style={{ fontSize: 14 }}>Who trained each round, in what order, and why</span>
+            </div>
+            {decisions.map((d, i) => <Decision key={`${d.job}-${d.round}-${d.time}`} d={d} latest={i === 0} />)}
+            {!decisions.length && (
+              <p className="muted">No rounds have started since the server last restarted. Decisions appear here when a job runs.</p>
+            )}
+          </section>
 
           <section className="card" style={{ borderRadius: 26 }}>
             <h2 className="section-title">Recent events</h2>

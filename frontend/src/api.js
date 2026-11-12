@@ -89,6 +89,7 @@ export const api = {
   adminStatus: () => request("/admin/status", { kind: "admin" }),
   adminNodes: () => request("/admin/nodes", { kind: "admin" }),
   adminEvents: () => request("/admin/events", { kind: "admin" }),
+  adminDecisions: () => request("/admin/decisions?limit=5", { kind: "admin" }),
 };
 
 // Accuracy may arrive as a fraction (0.54) or a percentage (54).
