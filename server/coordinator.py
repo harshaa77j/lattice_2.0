@@ -11,7 +11,7 @@ from typing import Callable, Optional
 import numpy as np
 import torch
 
-from scheduler.select import choose_nodes
+from scheduler.select import choose_nodes, explain
 from server.aggregator import fedavg
 from shared.data import slice_data
 from shared.models import get_spec
@@ -107,6 +107,7 @@ class Coordinator:
         self.jobs: dict[str, Job] = {}
         self.round: Optional[Round] = None
         self.events: deque = deque(maxlen=200)
+        self.decisions: deque = deque(maxlen=20)   # the scheduler's choices, newest first
         self.started_at = clock()
         self.last_scheduler = "heuristic"
         self._shape_cache: dict = {}
@@ -330,6 +331,7 @@ class Coordinator:
             return
 
         chosen, used = choose_nodes(features, job_info)
+        reasons = explain(features, job_info, used)        # may call the RL policy: keep it outside the lock
         with self.lock:
             if self.round is not None or job.status not in ACTIVE:
                 return
@@ -347,6 +349,16 @@ class Coordinator:
                                num_slices=len(chosen), opened_at=now, deadline=now + self.round_deadline)
             for nid in chosen:
                 self.nodes[nid].rounds_assigned += 1
+            order = {nid: i + 1 for i, nid in enumerate(chosen)}
+            candidates = [{"node_id": f["node_id"], "device": f["device"], "reliability": f["reliability"],
+                           "avg_round_s": f["avg_round_s"], "recent_drops": f["recent_drops"],
+                           "chosen": f["node_id"] in order, "order": order.get(f["node_id"]),
+                           "slice": self.round.assignments.get(f["node_id"]),
+                           **reasons.get(f["node_id"], {"score": None, "reason": ""})}
+                          for f in features]
+            candidates.sort(key=lambda c: (c["order"] is None, c["order"] or 0))   # chosen first, in order
+            self.decisions.appendleft({"time": datetime.now().strftime("%H:%M:%S"), "job": job.name,
+                                       "round": number, "scheduler": used, "candidates": candidates})
             job.status = "training"
             job.started_at = job.started_at or utc_now_iso()
             self._event("info", f"round {number} started with {len(chosen)} volunteers")
@@ -502,10 +514,12 @@ class Coordinator:
     def admin_events(self, limit: int = 50) -> list:
         with self.lock:
             return list(self.events)[:limit]
-
+    
+    def admin_decisions(self, limit: int = 10) -> list:
+        with self.lock:
+            return list(self.decisions)[:limit]
 
 EVAL_FILE = Path(__file__).resolve().parent / "eval" / "cifar10_test.npz"
-
 
 class Evaluator:
     """Server-side evaluation: a fixed test subset each round, the full set to confirm.

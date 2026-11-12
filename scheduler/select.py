@@ -38,3 +38,29 @@ def choose_nodes(nodes: list, job: dict) -> tuple:
         except Exception as e:
             log.warning("RL scheduler failed (%s); using the heuristic this round", e)
     return heuristic_select(nodes, job), "heuristic"
+
+def heuristic_reason(n: dict) -> str:
+    """A short, human-readable summary of what the heuristic looked at for one node."""
+    parts = [f"reliability {n['reliability']:.0%}"]
+    parts.append(f"~{n['avg_round_s']:.0f} s per round" if n.get("avg_round_s") is not None else "no timing yet")
+    if n.get("recent_drops"):
+        parts.append(f"{n['recent_drops']} recent drop(s)")
+    return ", ".join(parts)
+
+
+def explain(nodes: list, job: dict, used: str) -> dict:
+    """node_id -> {"score": float or None, "reason": str}, for the admin dashboard.
+
+    The heuristic ranks by rules (reliability, then speed), so it gives reasons, not scores.
+    When the RL policy made the choice and rl/policy.py also defines
+        explain(nodes, job) -> dict[node_id, float]
+    those scores are shown too. That function is optional: without it, only the reasons appear.
+    """
+    scores = {}
+    if used == "rl":
+        try:
+            from rl.policy import explain as rl_explain
+            scores = {str(k): float(v) for k, v in rl_explain(nodes, job).items()}
+        except Exception:
+            scores = {}
+    return {n["node_id"]: {"score": scores.get(n["node_id"]), "reason": heuristic_reason(n)} for n in nodes}
