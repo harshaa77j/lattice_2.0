@@ -12,6 +12,8 @@ import numpy as np
 import torch
 
 from scheduler.select import choose_nodes, explain
+from rl.decision_log import append_jsonl, trace_record
+
 from server.aggregator import fedavg
 from shared.data import slice_data
 from shared.models import get_spec
@@ -81,6 +83,9 @@ class Round:
     opened_at: float
     deadline: float
     updates: dict = field(default_factory=dict)   # node_id -> (state_dict, n_samples)
+    offered: list = field(default_factory=list)      # the features the scheduler saw (for traces)
+    chosen: list = field(default_factory=list)       # node_ids in slice order
+    scheduler: str = "heuristic"   
 
 
 class Coordinator:
@@ -93,6 +98,7 @@ class Coordinator:
         checkpoint_dir: Optional[str] = "checkpoints",
         clock: Callable[[], float] = time.monotonic,
         dataset_store=None,
+        trace_dir: Optional[str] = None,       
     ):
         self.evaluate_fn = evaluate_fn
         self.heartbeat_timeout = heartbeat_timeout
@@ -101,6 +107,7 @@ class Coordinator:
         self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else None
         self.clock = clock
         self.dataset_store = dataset_store
+        self.trace_dir = Path(trace_dir) if trace_dir else None
 
         self.lock = threading.Lock()
         self.nodes: dict[str, Node] = {}
@@ -346,7 +353,8 @@ class Coordinator:
             number = job.current_round + 1
             self.round = Round(job_id=job.job_id, number=number,
                                assignments=self._assign_slices(job, chosen),
-                               num_slices=len(chosen), opened_at=now, deadline=now + self.round_deadline)
+                               num_slices=len(chosen), opened_at=now, deadline=now + self.round_deadline,
+                               offered=features, chosen=list(chosen), scheduler=used)
             for nid in chosen:
                 self.nodes[nid].rounds_assigned += 1
             order = {nid: i + 1 for i, nid in enumerate(chosen)}
@@ -357,7 +365,7 @@ class Coordinator:
                            **reasons.get(f["node_id"], {"score": None, "reason": ""})}
                           for f in features]
             candidates.sort(key=lambda c: (c["order"] is None, c["order"] or 0))   # chosen first, in order
-            self.decisions.appendleft({"time": datetime.now().strftime("%H:%M:%S"), "job": job.name,
+            self.decisions.appendleft({"time": datetime.now().strftime("%H:%M:%S"), "job": job.name, "job_id": job.job_id,
                                        "round": number, "scheduler": used, "candidates": candidates})
             job.status = "training"
             job.started_at = job.started_at or utc_now_iso()
@@ -387,6 +395,27 @@ class Coordinator:
 
     def _evaluate(self, job: Job, state: dict, full: bool) -> float:
         return self.evaluate_fn(job.model, state, full, dataset=job.dataset, num_classes=job.num_classes)
+    
+    def _record_outcome(self, job: Job, r: Round, seconds: float, accuracy):
+        """Attach the outcome to the dashboard's decision card, and append the round to the trace file.
+        Called outside the lock; the trace write can never break a round."""
+        reported = list(r.updates.keys())
+        with self.lock:
+            for d in self.decisions:
+                if d.get("job_id") == job.job_id and d["round"] == r.number:
+                    d["outcome"] = {"reported": reported, "dropped": [n for n in r.chosen if n not in r.updates],
+                                    "seconds": round(seconds, 1),
+                                    "accuracy": None if accuracy is None else round(accuracy, 4)}
+                    break
+        if not self.trace_dir:
+            return
+        try:
+            rec = trace_record(r.number, {"name": job.name, "job_id": job.job_id, "model": job.model,
+                                          "dataset": job.dataset}, r.offered, r.chosen, reported,
+                               seconds, r.scheduler, accuracy)
+            append_jsonl(str(self.trace_dir / f"{job.job_id}_{r.scheduler}.jsonl"), rec)
+        except Exception as e:
+            log.warning("could not write the round trace: %s", e)
 
     def _finish_round(self, job: Job, closing: dict):
         """Aggregate and evaluate outside the lock, then record the result."""
@@ -394,6 +423,7 @@ class Coordinator:
         if not updates:
             with self.lock:
                 self._event("dropped", f"round {r.number} got no updates; retrying it")
+            self._record_outcome(job, r, closing["seconds"], None)
             return
 
         new_state = fedavg(updates)
@@ -404,6 +434,7 @@ class Coordinator:
             reached = accuracy >= job.target_accuracy
         new_bytes = state_dict_to_bytes(new_state)
         self._save_checkpoint(job.job_id, r.number, new_bytes)
+        self._record_outcome(job, r, closing["seconds"], accuracy)
 
         with self.lock:
             job.weights = new_bytes

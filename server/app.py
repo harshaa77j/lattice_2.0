@@ -72,6 +72,7 @@ coord = Coordinator(
     min_nodes=SETTINGS["min_nodes"],
     checkpoint_dir=os.getenv("LATTICE_CHECKPOINT_DIR", "checkpoints"),
     dataset_store=datasets,
+    trace_dir=os.getenv("LATTICE_TRACE_DIR", "traces"),
 )
 
 @asynccontextmanager
@@ -282,6 +283,25 @@ def admin_events():
 def admin_decisions(limit: int = Query(default=10, ge=1, le=20)):
     """The scheduler's recent choices: candidates, order, slices and reasons, newest first."""
     return coord.admin_decisions(limit)
+
+TRACE_NAME = re.compile(r"^[a-f0-9]{8}_(rl|heuristic)\.jsonl$")
+
+@app.get("/admin/traces", dependencies=[Depends(require_admin_key)])
+def list_traces():
+    """Round traces for scheduler analysis: one file per job and scheduler."""
+    folder = coord.trace_dir
+    if not folder or not folder.is_dir():
+        return []
+    return [{"name": p.name, "bytes": p.stat().st_size, "rounds": sum(1 for _ in p.open())}
+            for p in sorted(folder.glob("*.jsonl"))]
+
+
+@app.get("/admin/traces/{name}", dependencies=[Depends(require_admin_key)])
+def get_trace(name: str):
+    if not TRACE_NAME.match(name) or not coord.trace_dir or not (coord.trace_dir / name).is_file():
+        raise HTTPException(status_code=404, detail="no such trace")
+    return Response(content=(coord.trace_dir / name).read_bytes(), media_type="application/x-ndjson",
+                    headers={"Content-Disposition": f'attachment; filename="{name}"'})
 
 def _public_url(request: Request) -> str:
     if PUBLIC_URL:
